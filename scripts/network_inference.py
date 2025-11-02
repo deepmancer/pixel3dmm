@@ -89,7 +89,12 @@ def main(cfg):
             ''')
 
     for OUT_NAME in OUT_NAMES:
-        folder = f'{env_paths.PREPROCESSED_DATA}/{OUT_NAME}/'
+        # Use provided preprocessed_dir or default to env_paths
+        if hasattr(cfg, 'preprocessed_dir') and cfg.preprocessed_dir is not None:
+            folder = cfg.preprocessed_dir
+        else:
+            folder = f'{env_paths.PREPROCESSED_DATA}/{OUT_NAME}/'
+        
         IMAGE_FOLDER = f'{folder}/cropped'
         SEGEMNTATION_FOLDER = f'{folder}/seg_og/'
 
@@ -98,11 +103,11 @@ def main(cfg):
         out_folders_viz = {}
 
         for prediction_type in prediction_types:
-            out_folders[prediction_type] = f'{env_paths.PREPROCESSED_DATA}/{OUT_NAME}/p3dmm/{prediction_type}/'
-            out_folders_wGT[prediction_type] = f'{env_paths.PREPROCESSED_DATA}/{OUT_NAME}/p3dmm_wGT/{prediction_type}/'
+            out_folders[prediction_type] = f'{folder}/p3dmm/{prediction_type}/'
+            out_folders_wGT[prediction_type] = f'{folder}/p3dmm_wGT/{prediction_type}/'
             os.makedirs(out_folders[prediction_type], exist_ok=True)
             os.makedirs(out_folders_wGT[prediction_type], exist_ok=True)
-            out_folders_viz[prediction_type] = f'{env_paths.PREPROCESSED_DATA}/{OUT_NAME}/p3dmm_extraViz/{prediction_type}/'
+            out_folders_viz[prediction_type] = f'{folder}/p3dmm_extraViz/{prediction_type}/'
             os.makedirs(out_folders_viz[prediction_type], exist_ok=True)
 
 

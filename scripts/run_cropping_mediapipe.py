@@ -117,7 +117,8 @@ def process_image_mediapipe(image_path, output_dir, target_size=512):
 def main(
     video_or_images_path: str,
     start_frame: int = 0,
-    target_size: int = 512
+    target_size: int = 512,
+    output_dir: str = None
 ):
     if os.path.isdir(video_or_images_path):
         vid_name = os.path.basename(video_or_images_path.rstrip('/'))
@@ -128,7 +129,11 @@ def main(
         image_dir = Path(video_or_images_path).parent
         image_files = [Path(video_or_images_path)]
     
-    output_base = Path(env_paths.PREPROCESSED_DATA) / vid_name
+    # Use provided output_dir or default to env_paths
+    if output_dir is None:
+        output_base = Path(env_paths.PREPROCESSED_DATA) / vid_name
+    else:
+        output_base = Path(output_dir)
     output_base.mkdir(parents=True, exist_ok=True)
     
     cropped_dir = output_base / 'cropped'
@@ -168,6 +173,18 @@ def main(
         
         cv2.imwrite(str(cropped_dir / numbered_filename), resized)
         cv2.imwrite(str(arcface_dir / numbered_filename), resized)
+        
+        # Save crop box parameters
+        crop_params_dir = output_base / 'crop_params'
+        crop_params_dir.mkdir(exist_ok=True)
+        crop_params = {
+            'original_bbox': list(bbox),  # [x, y, w, h]
+            'crop_coords': list(crop_coords),  # [x1, y1, x2, y2]
+            'original_size': [image.shape[1], image.shape[0]],  # [width, height]
+            'cropped_size': [resized.shape[1], resized.shape[0]],  # [width, height]
+            'scale_factor': 1.8
+        }
+        np.save(str(crop_params_dir / f"{frame_number:05d}.npy"), crop_params)
         
         # Save landmarks
         landmarks = get_landmarks_mediapipe(resized)

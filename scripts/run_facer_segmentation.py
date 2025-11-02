@@ -134,33 +134,37 @@ face_detector = facer.face_detector('retinaface/mobilenet', device=device)
 face_parser = facer.face_parser('farl/celebm/448', device=device)  # optional "farl/lapa/448"
 
 
-def main(video_name : str):
+def main(video_name: str, preprocessed_dir: str = None):
 
-
-    out = f'{env_paths.PREPROCESSED_DATA}/{video_name}'
-    out_seg = f'{out}/seg_og/'
-    out_seg_annot = f'{out}/seg_non_crop_annotations/'
+    # Use provided preprocessed_dir or default to env_paths
+    if preprocessed_dir is None:
+        out = f'{env_paths.PREPROCESSED_DATA}/{video_name}'
+    else:
+        out = preprocessed_dir
+    
+    out_seg = f'{out}/seg_og/'  # Grayscale segmentation of cropped image
+    out_seg_annot_cropped = f'{out}/seg_cropped_annotations/'  # Colored segmentation of cropped image
+    out_seg_annot_full = f'{out}/seg_full_annotations/'  # Colored segmentation of full image
     os.makedirs(out_seg, exist_ok=True)
-    os.makedirs(out_seg_annot, exist_ok=True)
-    folder = f'{out}/cropped/'  # '/home/giebenhain/GTA/data_kinect/color/'
+    os.makedirs(out_seg_annot_cropped, exist_ok=True)
+    os.makedirs(out_seg_annot_full, exist_ok=True)
+    folder_cropped = f'{out}/cropped/'
+    folder_rgb = f'{out}/rgb/'  # Full original images
 
-
-
-
-
-    frames = [f for f in os.listdir(folder) if f.endswith('.png') or f.endswith('.jpg')]
-
+    # Get frames from cropped folder
+    frames = [f for f in os.listdir(folder_cropped) if f.endswith('.png') or f.endswith('.jpg')]
     frames.sort()
 
-    if len(os.listdir(out_seg)) == len(frames):
+    if len(os.listdir(out_seg)) == len(frames) and len(os.listdir(out_seg_annot_full)) == len(frames):
         print(f'''
                         <<<<<<<< ALREADY COMPLETED SEGMENTATION FOR {video_name}, SKIPPING >>>>>>>>
                         ''')
         return
 
-    #for file in frames:
     batch_size = 1
 
+    # Process cropped images for grayscale segmentation
+    print(f"Processing {len(frames)} cropped images for segmentation...")
     for i in range(len(frames)//batch_size):
         image_stack = []
         frame_stack = []
@@ -168,10 +172,10 @@ def main(video_name : str):
         for j in range(batch_size):
             file = frames[i * batch_size + j]
 
-            if os.path.exists(f'{out_seg_annot}/color_{file}.png'):
+            if os.path.exists(f'{out_seg}/00000.png') and os.path.exists(f'{out_seg_annot_cropped}/color_{file}'):
                 print('DONE')
                 continue
-            img = Image.open(f'{folder}/{file}')#.resize((512, 512))
+            img = Image.open(f'{folder_cropped}/{file}')
 
             og_size = img.size
 
@@ -204,11 +208,58 @@ def main(video_name : str):
                     iidx = faces['image_ids'][_iidx].item()
                     try:
                         I_color = viz_results(image_batch[iidx:iidx+1], seq_classes=seg_classes[_iidx:_iidx+1], n_classes=seg_probs.shape[1] + 1, suppress_plot=True)
-                        I_color.save(f'{out_seg_annot}/color_{frame}.png')
+                        I_color.save(f'{out_seg_annot_cropped}/color_{frame}.png')
                     except Exception as ex:
                         pass
                     I = Image.fromarray(seg_classes[_iidx])
                     I.save(f'{out_seg}/{frame}.png')
+                torch.cuda.empty_cache()
+            except Exception as exx:
+                traceback.print_exc()
+                continue
+    
+    # Process full RGB images for annotated colored segmentation
+    print(f"\nProcessing {len(frames)} full RGB images for annotated segmentation...")
+    for i in range(len(frames)//batch_size):
+        image_stack = []
+        frame_stack = []
+        for j in range(batch_size):
+            file = frames[i * batch_size + j]
+
+            if os.path.exists(f'{out_seg_annot_full}/color_{file}'):
+                print('DONE')
+                continue
+            img = Image.open(f'{folder_rgb}/{file}')
+
+            image = facer.hwc2bchw(torch.from_numpy(np.array(img)[..., :3])).to(device=device)
+            image_stack.append(image)
+            frame_stack.append(file[:-4])
+
+        for batch_idx in range(ceil(len(image_stack)/batch_size)):
+            image_batch = torch.cat(image_stack[batch_idx*batch_size:(batch_idx+1)*batch_size], dim=0)
+            frame_idx_batch = frame_stack[batch_idx*batch_size:(batch_idx+1)*batch_size]
+
+            try:
+                with torch.inference_mode():
+                    faces = face_detector(image_batch)
+                    torch.cuda.empty_cache()
+                    faces = face_parser(image_batch, faces, bbox_scale_factor=1.25)
+                    torch.cuda.empty_cache()
+
+                seg_logits = faces['seg']['logits']
+                back_ground = torch.all(seg_logits == 0, dim=1, keepdim=True).detach().squeeze(1).cpu().numpy()
+                seg_probs = seg_logits.softmax(dim=1)
+                seg_classes = seg_probs.argmax(dim=1).detach().cpu().numpy().astype(np.uint8)
+                seg_classes[back_ground] = seg_probs.shape[1] + 1
+
+                for _iidx in range(seg_probs.shape[0]):
+                    frame = frame_idx_batch[_iidx]
+                    iidx = faces['image_ids'][_iidx].item()
+                    try:
+                        I_color = viz_results(image_batch[iidx:iidx+1], seq_classes=seg_classes[_iidx:_iidx+1], n_classes=seg_probs.shape[1] + 1, suppress_plot=True)
+                        I_color.save(f'{out_seg_annot_full}/color_{frame}.png')
+                    except Exception as ex:
+                        pass
                 torch.cuda.empty_cache()
             except Exception as exx:
                 traceback.print_exc()

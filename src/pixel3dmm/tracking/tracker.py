@@ -135,7 +135,14 @@ class Tracker(object):
         self.config = config
         self.device = device
         self.actor_name = self.config.video_name
-        DATA_FOLDER = f'{env_paths.PREPROCESSED_DATA}/{self.actor_name}'
+        
+        # Use provided preprocessed_dir or default to env_paths
+        if hasattr(config, 'preprocessed_dir') and config.preprocessed_dir is not None:
+            DATA_FOLDER = config.preprocessed_dir
+        else:
+            DATA_FOLDER = f'{env_paths.PREPROCESSED_DATA}/{self.actor_name}'
+        
+        self.preprocessed_dir = DATA_FOLDER
         self.MAX_STEPS = min(len([f for f in os.listdir(f'{DATA_FOLDER}/cropped/') if f.endswith('.jpg') or f.endswith('.png')]) - self.config.start_frame, 1000)
         self.FRAME_SKIP = 1
         self.BATCH_SIZE = min(self.config.batch_size, self.MAX_STEPS)
@@ -190,10 +197,15 @@ class Tracker(object):
         self.frame = 0
         self.is_initializing = False
         self.image_size = torch.tensor([[config.image_size[0], config.image_size[1]]]).cuda()
-        if hasattr(self.config, 'output_folder'):
+        
+        # Use provided tracking_output_dir or output_folder or default to env_paths
+        if hasattr(self.config, 'tracking_output_dir') and self.config.tracking_output_dir is not None:
+            self.save_folder = self.config.tracking_output_dir
+        elif hasattr(self.config, 'output_folder'):
             self.save_folder = self.config.output_folder
         else:
             self.save_folder = env_paths.TRACKING_OUTPUT
+        
         self.output_folder = os.path.join(self.save_folder, self.actor_name)
         self.checkpoint_folder = os.path.join(self.save_folder, self.actor_name, "checkpoint")
         self.mesh_folder = os.path.join(self.save_folder, self.actor_name, "mesh")
@@ -1545,8 +1557,8 @@ class Tracker(object):
 
 
     def read_data(self, timestep):
-        DATA_FOLDER = f'{env_paths.PREPROCESSED_DATA}/{self.config.video_name}'
-        P3DMM_FOLDER = f'{env_paths.PREPROCESSED_DATA}/{self.config.video_name}/p3dmm/'
+        DATA_FOLDER = self.preprocessed_dir
+        P3DMM_FOLDER = f'{self.preprocessed_dir}/p3dmm/'
 
         try:
             rgb = np.array(Image.open(f'{DATA_FOLDER}/cropped/{timestep:05d}.jpg').resize((self.config.size, self.config.size))) / 255
