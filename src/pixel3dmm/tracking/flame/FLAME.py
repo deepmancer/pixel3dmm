@@ -67,12 +67,13 @@ class FLAME(nn.Module):
     def __init__(self, config):
         super(FLAME, self).__init__()
         if config.use_flame2023:
-            with open(f'{env_paths.FLAME_ASSETS}/FLAME2023/flame2023_no_jaw.pkl', 'rb') as f:
+            flame2023_path = f'{env_paths.FLAME_2020_PATH.replace("FLAME2020", "FLAME2023")}/flame2023_no_jaw.pkl'
+            with open(flame2023_path, 'rb') as f:
                 ss = pickle.load(f, encoding='latin1')
                 flame_model = Struct(**ss)
             self.use_flame2023 = True
         else:
-            with open(f'{env_paths.FLAME_ASSETS}/FLAME2020/generic_model.pkl', 'rb') as f:
+            with open(env_paths.FLAME_GENERIC_MODEL, 'rb') as f:
                 ss = pickle.load(f, encoding='latin1')
                 flame_model = Struct(**ss)
             self.use_flame2023 = False

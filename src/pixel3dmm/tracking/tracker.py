@@ -260,6 +260,32 @@ class Tracker(object):
         self.faces = load_obj(mesh_file)[1]
 
 
+    def _rotation_matrix_to_euler_angles(self, R):
+        sy = torch.sqrt(R[:, 0, 0] * R[:, 0, 0] + R[:, 1, 0] * R[:, 1, 0])
+        
+        singular = sy < 1e-6
+        
+        pitch = torch.where(
+            singular,
+            torch.atan2(-R[:, 1, 2], R[:, 1, 1]),
+            torch.atan2(R[:, 2, 1], R[:, 2, 2])
+        )
+        
+        yaw = torch.where(
+            singular,
+            torch.atan2(-R[:, 2, 0], sy),
+            torch.atan2(-R[:, 2, 0], sy)
+        )
+        
+        roll = torch.where(
+            singular,
+            torch.zeros_like(pitch),
+            torch.atan2(R[:, 1, 0], R[:, 0, 0])
+        )
+        
+        return torch.stack([pitch, yaw, roll], dim=1)
+
+
     def save_checkpoint(self, frame_id, selected_frames = None):
 
         if selected_frames is None:
@@ -287,6 +313,12 @@ class Tracker(object):
                 focal_length = self.focal_length(selected_frames)
                 principal_point = self.principal_point(selected_frames)
 
+        R_matrix = rotation_6d_to_matrix(R)
+        head_forward = R_matrix[:, :, 2].clone().detach().cpu().numpy()
+        head_up = R_matrix[:, :, 1].clone().detach().cpu().numpy()
+        head_right = R_matrix[:, :, 0].clone().detach().cpu().numpy()
+        euler_angles = self._rotation_matrix_to_euler_angles(R_matrix).detach().cpu().numpy()
+        
         frame = {
             'flame': {
                 'exp': exp.clone().detach().cpu().numpy(),
@@ -296,8 +328,14 @@ class Tracker(object):
                 'jaw': jaw.clone().detach().cpu().numpy(),
                 'neck': neck.clone().detach().cpu().numpy(),
                 'R': R.clone().detach().cpu().numpy(),
-                'R_rotation_matrix': rotation_6d_to_matrix(R).detach().cpu().numpy(),
+                'R_rotation_matrix': R_matrix.detach().cpu().numpy(),
                 't': t.clone().detach().cpu().numpy(),
+                'head_orientation': {
+                    'forward_vector': head_forward,
+                    'up_vector': head_up,
+                    'right_vector': head_right,
+                    'euler_angles_xyz': euler_angles,
+                }
             },
             'img_size': self.image_size.clone().detach().cpu().numpy()[0],
             'frame_id': frame_id,
@@ -348,6 +386,15 @@ class Tracker(object):
             if self.config.save_meshes:
                 trimesh.Trimesh(faces=f, vertices=v, process=False).export(f'{self.mesh_folder}/{frame_id:05d}.ply')
             torch.save(frame, f'{self.checkpoint_folder}/{frame_id:05d}.frame')
+            
+            np.save(f'{self.checkpoint_folder}/{frame_id:05d}_head_orientation.npy', frame['flame']['head_orientation'])
+            
+            if b_i == 0:
+                print(f"Frame {frame_id} Head Orientation:")
+                print(f"  Forward Vector: {frame['flame']['head_orientation']['forward_vector'][0]}")
+                print(f"  Euler Angles (deg): pitch={np.rad2deg(frame['flame']['head_orientation']['euler_angles_xyz'][0, 0]):.2f}, "
+                      f"yaw={np.rad2deg(frame['flame']['head_orientation']['euler_angles_xyz'][0, 1]):.2f}, "
+                      f"roll={np.rad2deg(frame['flame']['head_orientation']['euler_angles_xyz'][0, 2]):.2f}")
 
             selction_indx = np.array([36, 39, 42, 45, 33, 48, 54])
             _lmks = lmks[b_i].detach().squeeze().cpu().numpy()
@@ -1753,7 +1800,8 @@ class Tracker(object):
             video_frames.append(np.array(result_rendering))
             self.frame += 1
 
-        mediapy.write_video(f'{self.save_folder}/{self.actor_name}/result.mp4', images=video_frames, crf=15, fps=25)
+        # Video export disabled
+        # mediapy.write_video(f'{self.save_folder}/{self.actor_name}/result.mp4', images=video_frames, codec='libx264', crf=15, fps=25)
 
 
         # Optionally delete all preoprocessing artifacts, once tracking is done (only keep cropped images)
