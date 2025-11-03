@@ -23,6 +23,7 @@ import json
 import shutil
 import argparse
 import subprocess
+import pickle
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -38,6 +39,24 @@ from pixel3dmm import env_paths
 from pixel3dmm.utils.utils_3d import rotation_6d_to_matrix
 from dreifus.matrix import Intrinsics, Pose, CameraCoordinateConvention, PoseType
 from dreifus.pyvista import render_from_camera
+
+
+def load_flame_neck_mask():
+    """
+    Load FLAME neck vertex indices from the official FLAME vertex mappings.
+    
+    Returns:
+        np.ndarray: Indices of neck vertices to exclude from head rendering.
+    """
+    flame_masks_path = Path(__file__).parent.parent.parent / "assets" / "body_models" / "base_models" / "flame" / "vertex_mappings" / "FLAME_masks.pkl"
+    
+    if not flame_masks_path.exists():
+        raise FileNotFoundError(f"FLAME masks file not found at: {flame_masks_path}")
+    
+    with open(flame_masks_path, 'rb') as f:
+        masks = pickle.load(f, encoding='latin1')
+    
+    return masks['neck']
 
 
 def setup_output_dir(output_dir):
@@ -131,12 +150,21 @@ def run_tracking(vid_name, iters, preprocessed_dir, tracking_output_dir):
 def render_flame_segmentation(tracking_dir, preprocessed_dir, output_subdir):
     """
     Render FLAME mesh segmentation in the original (non-cropped) image space.
+    Excludes neck vertices using official FLAME vertex mappings.
     
     Creates:
-        - flame_segmentation.png: Binary mask of FLAME mesh
-        - flame_overlay.png: FLAME mesh overlaid on original image
+        - flame_segmentation.png: Binary mask of FLAME mesh (head only, no neck)
+        - flame_overlay.png: FLAME mesh overlaid on original image (head only, no neck)
     """
     print("  - Rendering FLAME segmentation in original image space...")
+    
+    # Load FLAME neck vertex indices
+    try:
+        neck_vertex_indices = load_flame_neck_mask()
+        print(f"    - Loaded FLAME neck mask ({len(neck_vertex_indices)} vertices to exclude)")
+    except Exception as e:
+        print(f"    ✗ Warning: Could not load FLAME neck mask: {e}")
+        neck_vertex_indices = np.array([])
     
     # Load the first mesh (frame 0)
     mesh_files = [f for f in os.listdir(tracking_dir / "mesh") if f.endswith('.ply') and 'canonical' not in f]
@@ -146,6 +174,36 @@ def render_flame_segmentation(tracking_dir, preprocessed_dir, output_subdir):
     
     mesh_files.sort()
     mesh = trimesh.load(str(tracking_dir / "mesh" / mesh_files[0]), process=False)
+    
+    # Filter out neck vertices and associated faces
+    if len(neck_vertex_indices) > 0:
+        # Create a mask for vertices to keep (all except neck)
+        all_vertex_indices = np.arange(len(mesh.vertices))
+        head_vertex_mask = np.ones(len(mesh.vertices), dtype=bool)
+        head_vertex_mask[neck_vertex_indices] = False
+        
+        # Filter faces: keep only faces where ALL vertices are in head region
+        face_mask = head_vertex_mask[mesh.faces].all(axis=1)
+        
+        # Create new mesh with only head vertices
+        # We need to remap vertex indices in faces after removing vertices
+        old_to_new_idx = np.full(len(mesh.vertices), -1, dtype=int)
+        old_to_new_idx[head_vertex_mask] = np.arange(head_vertex_mask.sum())
+        
+        new_vertices = mesh.vertices[head_vertex_mask]
+        new_faces = old_to_new_idx[mesh.faces[face_mask]]
+        
+        # Create filtered mesh
+        mesh = trimesh.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
+        print(f"    - Filtered mesh: {len(new_vertices)} vertices, {len(new_faces)} faces (excluded {len(neck_vertex_indices)} neck vertices)")
+        
+        # Extract largest connected component to remove any disconnected neck ring or fragments
+        components = mesh.split(only_watertight=False)
+        if len(components) > 1:
+            # Sort by number of vertices (largest first) using sorted()
+            components = sorted(components, key=lambda m: len(m.vertices), reverse=True)
+            mesh = components[0]
+            print(f"    - Selected largest component: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces (removed {len(components)-1} smaller component(s))")
     
     # Load checkpoint for camera and FLAME parameters
     ckpt_files = [f for f in os.listdir(tracking_dir / "checkpoint") if f.endswith('.frame')]
@@ -242,18 +300,41 @@ def render_flame_segmentation(tracking_dir, preprocessed_dir, output_subdir):
     alpha = rendered[..., 3]
     flame_mask = (alpha > 0).astype(np.uint8) * 255
     
+    # Fill holes: convert all enclosed black regions (except the largest) to white
+    # Invert mask: black (0) becomes white (255), white (255) becomes black (0)
+    inverted = 255 - flame_mask
+    
+    # Find all connected components in the inverted image (white regions in original = black in inverted)
+    from scipy import ndimage
+    labeled, num_features = ndimage.label(inverted)
+    
+    if num_features > 1:
+        # Calculate size of each component
+        component_sizes = ndimage.sum(inverted, labeled, range(1, num_features + 1))
+        
+        # Find the largest component (this is the main background)
+        largest_component_label = np.argmax(component_sizes) + 1
+        
+        # Create mask keeping only the largest component
+        largest_component_mask = (labeled == largest_component_label)
+        
+        # Invert back: largest black region stays black, all other black regions become white
+        flame_mask = np.where(largest_component_mask, 0, 255).astype(np.uint8)
+        
+        print(f"    - Filled {num_features - 1} enclosed region(s) inside FLAME mask")
+    
     # Save binary segmentation
     Image.fromarray(flame_mask).save(output_subdir / "flame_segmentation.png")
-    print(f"    ✓ Saved: flame_segmentation.png")
+    print(f"    ✓ Saved: flame_segmentation.png (head only, neck excluded, holes filled)")
     
-    # Create overlay (50% original image + 50% rendered mesh)
+    # Create overlay (70% original image + 30% rendered mesh for subtlety)
     overlay = original_img.copy()
     mask_bool = alpha > 0
     if rendered.shape[:2] == original_img.shape[:2]:
-        overlay[mask_bool] = (original_img[mask_bool] * 0.5 + rendered[mask_bool, :3] * 0.5).astype(np.uint8)
+        overlay[mask_bool] = (original_img[mask_bool] * 0.7 + rendered[mask_bool, :3] * 0.3).astype(np.uint8)
     
     Image.fromarray(overlay).save(output_subdir / "flame_overlay.png")
-    print(f"    ✓ Saved: flame_overlay.png")
+    print(f"    ✓ Saved: flame_overlay.png (head only, neck excluded)")
 
 
 def extract_and_save_outputs(vid_name, output_subdir, preprocessed_dir, tracking_output_dir):
