@@ -64,7 +64,7 @@ class FLAME(nn.Module):
     which outputs the a mesh and 2D/3D facial landmarks
     """
 
-    def __init__(self, config):
+    def __init__(self, config, mediapipe_lmk_face_idx=None, mediapipe_lmk_b_coords=None):
         super(FLAME, self).__init__()
         if config.use_flame2023:
             flame2023_path = f'{env_paths.FLAME_2020_PATH.replace("FLAME2020", "FLAME2023")}/flame2023_no_jaw.pkl'
@@ -79,6 +79,16 @@ class FLAME(nn.Module):
             self.use_flame2023 = False
 
         self.dtype = torch.float32
+        
+        # Store MediaPipe landmark mapping if provided
+        # Always register buffers (even if None) to avoid torch.compile issues
+        if mediapipe_lmk_face_idx is not None and mediapipe_lmk_b_coords is not None:
+            self.register_buffer('mediapipe_lmk_face_idx', mediapipe_lmk_face_idx)
+            self.register_buffer('mediapipe_lmk_b_coords', mediapipe_lmk_b_coords)
+        else:
+            # Register empty buffers to maintain consistent model structure
+            self.register_buffer('mediapipe_lmk_face_idx', None)
+            self.register_buffer('mediapipe_lmk_b_coords', None)
         self.register_buffer('faces', to_tensor(to_np(flame_model.f, dtype=np.int64), dtype=torch.long))
         # The vertices of the template model
         self.register_buffer('v_template', to_tensor(to_np(flame_model.v_template), dtype=self.dtype))
@@ -287,14 +297,23 @@ class FLAME(nn.Module):
         lmk_bary_coords = torch.cat([dyn_lmk_bary_coords, lmk_bary_coords], 1)
 
         lmk68 = self._vertices2landmarks(vertices, self.faces, lmk_faces_idx, lmk_bary_coords)
-
-
+        
+        # Compute MediaPipe landmarks if tracker has MediaPipe support
+        # Check if buffers are not None (they're registered buffers, so they exist but may be None)
+        if self.mediapipe_lmk_face_idx is not None:
+            # Use the same vertices2landmarks method with MediaPipe indices
+            mediapipe_faces_idx = self.mediapipe_lmk_face_idx.unsqueeze(0).expand(batch_size, -1).contiguous()
+            mediapipe_bary_coords = self.mediapipe_lmk_b_coords.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+            lmkMP = self._vertices2landmarks(vertices, self.faces, mediapipe_faces_idx, mediapipe_bary_coords)
+        else:
+            # Return empty tensor to maintain consistent return signature for torch.compile
+            lmkMP = torch.zeros(batch_size, 0, 3, dtype=vertices.dtype, device=vertices.device)
 
         # always zero in this code-base
         #vertices = vertices + trans_params.unsqueeze(dim=1)
         #lmk68 = lmk68 + trans_params.unsqueeze(dim=1)
 
-        return vertices, lmk68, joint_transforms, v_can, vertices_noneck
+        return vertices, lmk68, lmkMP, v_can, vertices_noneck
 
     def _register_default_params(self, param_fname, dim):
         default_params = torch.zeros([1, dim], dtype=self.dtype, requires_grad=False)
