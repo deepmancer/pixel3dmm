@@ -34,32 +34,6 @@ def detect_face_mediapipe(image):
         return (x, y, w, h)
 
 
-def get_landmarks_mediapipe(image):
-    mp_face_mesh = mp.solutions.face_mesh
-    
-    with mp_face_mesh.FaceMesh(
-        static_image_mode=True,
-        max_num_faces=1,
-        refine_landmarks=True,
-        min_detection_confidence=0.5
-    ) as face_mesh:
-        results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        
-        if not results.multi_face_landmarks:
-            return None
-        
-        landmarks = results.multi_face_landmarks[0]
-        ih, iw, _ = image.shape
-        
-        landmark_points = []
-        for landmark in landmarks.landmark:
-            x = int(landmark.x * iw)
-            y = int(landmark.y * ih)
-            landmark_points.append([x, y])
-        
-        return np.array(landmark_points)
-
-
 def crop_face_from_bbox(image, bbox, scale=1.5):
     x, y, w, h = bbox
     
@@ -88,6 +62,10 @@ def crop_face_from_bbox(image, bbox, scale=1.5):
 
 
 def process_image_mediapipe(image_path, output_dir, target_size=512):
+    """
+    Process a single image with MediaPipe face detection and cropping.
+    Note: Landmark extraction is handled separately by run_pipnet_landmarks.py
+    """
     image = cv2.imread(str(image_path))
     if image is None:
         print(f"Failed to load image: {image_path}")
@@ -104,12 +82,6 @@ def process_image_mediapipe(image_path, output_dir, target_size=512):
     
     output_path = output_dir / image_path.name
     cv2.imwrite(str(output_path), resized)
-    
-    landmarks = get_landmarks_mediapipe(resized)
-    if landmarks is not None:
-        landmarks_dir = output_dir.parent / 'landmarks'
-        landmarks_dir.mkdir(exist_ok=True)
-        np.save(str(landmarks_dir / f"{image_path.stem}.npy"), landmarks)
     
     return True
 
@@ -185,13 +157,6 @@ def main(
             'scale_factor': 1.8
         }
         np.save(str(crop_params_dir / f"{frame_number:05d}.npy"), crop_params)
-        
-        # Save landmarks
-        landmarks = get_landmarks_mediapipe(resized)
-        if landmarks is not None:
-            landmarks_dir = output_base / 'landmarks'
-            landmarks_dir.mkdir(exist_ok=True)
-            np.save(str(landmarks_dir / f"{frame_number:05d}.npy"), landmarks)
         
         success_count += 1
     
