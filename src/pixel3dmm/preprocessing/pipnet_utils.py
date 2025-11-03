@@ -1,8 +1,11 @@
 import importlib
 import os
+import sys
 import torch.nn.parallel
 import torch.utils.data
 import torchvision.transforms as transforms
+import mediapipe as mp
+from pathlib import Path
 
 
 from pixel3dmm.preprocessing.PIPNet.FaceBoxesV2.faceboxes_detector import *
@@ -10,6 +13,179 @@ from pixel3dmm.preprocessing.PIPNet.lib.networks import *
 from pixel3dmm.preprocessing.PIPNet.lib.functions import *
 from pixel3dmm.preprocessing.PIPNet.lib.mobilenetv3 import mobilenetv3_large
 from pixel3dmm import env_paths
+
+# Add utils directory to path for FacialLandmarkDetector
+from pixel3dmm.preprocessing.facial_landmark_detector import FacialLandmarkDetector
+
+
+def detect_face_mediapipe(image):
+    """
+    Detect face in image using MediaPipe face detection.
+    
+    Args:
+        image: BGR image from cv2.imread
+        
+    Returns:
+        Tuple of (x, y, w, h) bounding box or None if no face detected
+    """
+    mp_face_detection = mp.solutions.face_detection
+    
+    with mp_face_detection.FaceDetection(
+        model_selection=1,
+        min_detection_confidence=0.5
+    ) as face_detection:
+        results = face_detection.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        
+        if not results.detections:
+            return None
+        
+        detection = results.detections[0]
+        bboxC = detection.location_data.relative_bounding_box
+        ih, iw, _ = image.shape
+        
+        x = int(bboxC.xmin * iw)
+        y = int(bboxC.ymin * ih)
+        w = int(bboxC.width * iw)
+        h = int(bboxC.height * ih)
+        
+        return (x, y, w, h)
+
+
+def crop_face_from_bbox_mediapipe(image, bbox, scale=1.8):
+    """
+    Crop face from image using bounding box with scaling.
+    
+    Args:
+        image: Input image
+        bbox: Tuple of (x, y, w, h) bounding box
+        scale: Scale factor for cropping (default 1.8)
+        
+    Returns:
+        Tuple of (cropped_image, (x1, y1, x2, y2) crop coordinates)
+    """
+    x, y, w, h = bbox
+    
+    center_x = x + w // 2
+    center_y = y + h // 2
+    
+    size = max(w, h)
+    size = int(size * scale)
+    
+    x1 = max(0, center_x - size // 2)
+    y1 = max(0, center_y - size // 2)
+    x2 = min(image.shape[1], center_x + size // 2)
+    y2 = min(image.shape[0], center_y + size // 2)
+    
+    cropped = image[y1:y2, x1:x2]
+    
+    # Make square if not already
+    if cropped.shape[0] != cropped.shape[1]:
+        max_dim = max(cropped.shape[0], cropped.shape[1])
+        square = np.zeros((max_dim, max_dim, 3), dtype=np.uint8)
+        y_offset = (max_dim - cropped.shape[0]) // 2
+        x_offset = (max_dim - cropped.shape[1]) // 2
+        square[y_offset:y_offset+cropped.shape[0], x_offset:x_offset+cropped.shape[1]] = cropped
+        cropped = square
+    
+    return cropped, (x1, y1, x2, y2)
+
+
+def preprocess_with_mediapipe_cropping(
+    video_or_images_path: str,
+    output_dir: str,
+    target_size: int = 512,
+    start_frame: int = 0
+):
+    """
+    Preprocess images with MediaPipe face detection and cropping.
+    
+    This function:
+    1. Detects faces using MediaPipe
+    2. Crops and resizes to target_size x target_size
+    3. Saves to rgb/, cropped/, and arcface/ directories
+    4. Saves crop parameters
+    
+    Args:
+        video_or_images_path: Path to input images or directory
+        output_dir: Output directory for preprocessed data
+        target_size: Target size for cropped images (default 512)
+        start_frame: Starting frame index (default 0)
+        
+    Returns:
+        True if successful
+    """
+    if os.path.isdir(video_or_images_path):
+        vid_name = os.path.basename(video_or_images_path.rstrip('/'))
+        image_dir = Path(video_or_images_path)
+        image_files = sorted([f for f in image_dir.glob('*') if f.suffix.lower() in ['.jpg', '.jpeg', '.png']])
+    else:
+        vid_name = Path(video_or_images_path).stem
+        image_dir = Path(video_or_images_path).parent
+        image_files = [Path(video_or_images_path)]
+    
+    output_base = Path(output_dir)
+    output_base.mkdir(parents=True, exist_ok=True)
+    
+    cropped_dir = output_base / 'cropped'
+    cropped_dir.mkdir(exist_ok=True)
+    
+    rgb_dir = output_base / 'rgb'
+    rgb_dir.mkdir(exist_ok=True)
+    
+    arcface_dir = output_base / 'arcface'
+    arcface_dir.mkdir(exist_ok=True)
+    
+    print(f"Processing {len(image_files)} images with MediaPipe face detection...")
+    
+    success_count = 0
+    for i, image_file in enumerate(image_files[start_frame:], start=start_frame):
+        print(f"Processing {i+1}/{len(image_files)}: {image_file.name}")
+        
+        image = cv2.imread(str(image_file))
+        if image is None:
+            print(f"  Failed to load image")
+            continue
+        
+        # Save with numbered filenames (00000.jpg, 00001.jpg, etc.)
+        frame_number = i - start_frame
+        numbered_filename = f"{frame_number:05d}.jpg"
+        
+        cv2.imwrite(str(rgb_dir / numbered_filename), image)
+        
+        # Process and save cropped image with numbered filename
+        bbox = detect_face_mediapipe(image)
+        if bbox is None:
+            print(f"  No face detected, skipping")
+            continue
+        
+        cropped, crop_coords = crop_face_from_bbox_mediapipe(image, bbox, scale=1.8)
+        resized = cv2.resize(cropped, (target_size, target_size), interpolation=cv2.INTER_LANCZOS4)
+        
+        cv2.imwrite(str(cropped_dir / numbered_filename), resized)
+        cv2.imwrite(str(arcface_dir / numbered_filename), resized)
+        
+        # Save crop box parameters
+        crop_params_dir = output_base / 'crop_params'
+        crop_params_dir.mkdir(exist_ok=True)
+        crop_params = {
+            'original_bbox': list(bbox),  # [x, y, w, h]
+            'crop_coords': list(crop_coords),  # [x1, y1, x2, y2]
+            'original_size': [image.shape[1], image.shape[0]],  # [width, height]
+            'cropped_size': [resized.shape[1], resized.shape[0]],  # [width, height]
+            'scale_factor': 1.8
+        }
+        np.save(str(crop_params_dir / f"{frame_number:05d}.npy"), crop_params)
+        
+        success_count += 1
+    
+    print(f"\nSuccessfully processed {success_count}/{len(image_files)} images")
+    print(f"Output directory: {output_base}")
+    
+    if success_count == 0:
+        raise ValueError("No faces detected in any images. Please check your input images.")
+    
+    return True
+
 
 def smooth(x, window_len=11, window='hanning'):
     """smooth the data using a window with requested size.
@@ -236,15 +412,16 @@ def demo_image(image_dir, pid, save_dir, preprocess, cfg, input_size, net_stride
                             img_crop, det_ymin, det_ymax, det_xmin, det_xmax = get_cstm_crop(image, detection, detection_max, max_bbox=max_bbox)
                             #n_crop = get_cstm_crop(normals, detection)
                             image = img_crop
-                        # save cropped image
+                            
+                            # store cropping information:
+                            if not os.path.exists(f'{image_dir}/../crop_ymin_ymax_xmin_xmax.npy'):
+                                np.save(f'{image_dir}/../crop_ymin_ymax_xmin_xmax.npy', np.array([det_ymin, det_ymax, det_xmin, det_xmax]))
+                        
+                        # save cropped image (or original if disable_cropping=True)
                         os.makedirs(f'{image_dir}/../cropped/', exist_ok=True)
                         #os.makedirs(f'{image_dir}/../cropped_normals/', exist_ok=True)
                         cv2.imwrite(f'{image_dir}/../cropped/{file_name}', cv2.resize(image, (512, 512)))
                         #cv2.imwrite(f'{image_dir}/../cropped_normals/{file_name[:-4]}.png', cv2.resize(n_crop, (512, 512)))
-
-                        # store cropping information:
-                        if not os.path.exists(f'{image_dir}/../crop_ymin_ymax_xmin_xmax.npy'):
-                            np.save(f'{image_dir}/../crop_ymin_ymax_xmin_xmax.npy', np.array([det_ymin, det_ymax, det_xmin, det_xmax]))
     else:
         for file_name in files:
             image = cv2.imread(f'{image_dir}/{file_name}')
@@ -344,5 +521,200 @@ def demo_image(image_dir, pid, save_dir, preprocess, cfg, input_size, net_stride
     lms = np.stack(lms, axis=0)
     os.makedirs(f'{image_dir}/../pipnet', exist_ok=True)
     np.save(f'{image_dir}/../pipnet/test.npy', lms)
+    
+    # Extract MediaPipe landmarks automatically
+    print("\n" + "="*60)
+    print("Extracting MediaPipe landmarks...")
+    print("="*60)
+    extract_mediapipe_landmarks_for_preprocessing(image_dir)
+
+
+def extract_mediapipe_landmarks_for_preprocessing(image_dir):
+    """
+    Extract MediaPipe landmarks automatically during preprocessing.
+    This function is called automatically after PIPNet landmark extraction.
+    
+    Args:
+        image_dir: Path to the cropped images directory
+    """
+    from pathlib import Path
+    from tqdm import tqdm
+    import re
+    
+    # Get parent directory (preprocessed data folder)
+    data_path = Path(image_dir).parent
+    output_path = data_path / "mediapipe_landmarks"
+    
+    # Create output directory
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Check if already processed
+    cropped_path = data_path / "cropped"
+    if not cropped_path.exists():
+        print(f"Warning: Cropped images folder not found: {cropped_path}")
+        return
+    
+    image_files = sorted([f for f in cropped_path.iterdir() if f.suffix.lower() in ['.jpg', '.jpeg', '.png']])
+    
+    if len(image_files) == 0:
+        print(f"Warning: No image files found in {cropped_path}")
+        return
+
+    print(f"Found {len(image_files)} images to process")
+    
+    # Load landmark indices mapping if available
+    mapping_file = Path(env_paths.ASSETS) / "body_models/landmarks/flame/mediapipe_landmark_embedding.npz"
+    landmark_indices = None
+    
+    if mapping_file.exists():
+        try:
+            mapping = np.load(str(mapping_file))
+            landmark_indices = mapping['landmark_indices']
+            print(f"Loaded landmark mapping: will extract {len(landmark_indices)} landmarks from 478")
+        except Exception as e:
+            print(f"Warning: Failed to load mapping file: {e}")
+            print("Will extract all 478 landmarks")
+    else:
+        print(f"Warning: Mapping file not found at {mapping_file}")
+        print("Will extract all 478 landmarks")
+    
+    # Initialize MediaPipe detector
+    try:
+        detector = FacialLandmarkDetector(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+    except Exception as e:
+        print(f"Error initializing MediaPipe detector: {e}")
+        print("Skipping MediaPipe landmark extraction")
+        return
+    
+    # Process each image
+    successful = 0
+    failed = 0
+    failed_files = []
+    
+    for image_file in tqdm(image_files, desc="Extracting MediaPipe landmarks"):
+        try:
+            # Extract frame number from filename (handle different naming patterns)
+            try:
+                # Try to extract integer from filename
+                frame_num = int(image_file.stem)
+            except ValueError:
+                # If filename is not pure integer, try to extract number
+                match = re.search(r'(\d+)', image_file.stem)
+                if match:
+                    frame_num = int(match.group(1))
+                else:
+                    tqdm.write(f"Warning: Cannot extract frame number from {image_file.name}")
+                    failed += 1
+                    failed_files.append(image_file.name)
+                    continue
+            
+            # Check if already processed
+            output_file = output_path / f"mediapipe_lmk_{frame_num:05d}.npy"
+            if output_file.exists():
+                # Verify the file is valid
+                try:
+                    test_load = np.load(str(output_file))
+                    expected_shape = (len(landmark_indices), 2) if landmark_indices is not None else (478, 2)
+                    if test_load.shape == expected_shape:
+                        successful += 1
+                        continue
+                    else:
+                        tqdm.write(f"Warning: Existing file has wrong shape {test_load.shape}, re-extracting...")
+                except Exception:
+                    tqdm.write(f"Warning: Existing file is corrupted, re-extracting...")
+            
+            # Read image with cv2 and convert BGR to RGB
+            image_bgr = cv2.imread(str(image_file))
+            if image_bgr is None:
+                failed += 1
+                failed_files.append(image_file.name)
+                tqdm.write(f"Error: Failed to read image {image_file.name}")
+                continue
+            
+            # Get image dimensions for normalization
+            image_height, image_width = image_bgr.shape[:2]
+            
+            # Convert BGR to RGB for MediaPipe
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            
+            # Extract 478 landmarks using RGB image (returns pixel coordinates)
+            landmarks_478 = detector.get_lmk_478(image_rgb)
+            
+            if landmarks_478 is None:
+                failed += 1
+                failed_files.append(image_file.name)
+                tqdm.write(f"Warning: Failed to detect face in {image_file.name} (frame {frame_num})")
+                continue
+            
+            # Verify landmark shape
+            if landmarks_478.shape != (478, 2):
+                failed += 1
+                failed_files.append(image_file.name)
+                tqdm.write(f"Error: Unexpected landmark shape {landmarks_478.shape} for {image_file.name}")
+                continue
+            
+            # Normalize landmarks to [0, 1] range (same format as PIPNet landmarks)
+            # MediaPipe returns pixel coordinates, we need to normalize by image dimensions
+            landmarks_478_normalized = landmarks_478.copy()
+            landmarks_478_normalized[:, 0] = landmarks_478[:, 0] / image_width
+            landmarks_478_normalized[:, 1] = landmarks_478[:, 1] / image_height
+            
+            # Subset to specified landmarks if mapping provided
+            if landmark_indices is not None:
+                landmarks = landmarks_478_normalized[landmark_indices]
+            else:
+                landmarks = landmarks_478_normalized
+            
+            # Verify final shape
+            expected_shape = (len(landmark_indices), 2) if landmark_indices is not None else (478, 2)
+            if landmarks.shape != expected_shape:
+                failed += 1
+                failed_files.append(image_file.name)
+                tqdm.write(f"Error: Final landmark shape {landmarks.shape} != expected {expected_shape}")
+                continue
+            
+            # Save normalized landmarks (same format as PIPNet: [0, 1] range)
+            np.save(str(output_file), landmarks)
+            successful += 1
+            
+        except Exception as e:
+            failed += 1
+            failed_files.append(image_file.name)
+            tqdm.write(f"Error processing {image_file.name}: {e}")
+    
+    # Print summary
+    print("\n" + "="*60)
+    print("MediaPipe Landmark Extraction Complete")
+    print("="*60)
+    print(f"Successfully processed: {successful} / {len(image_files)}")
+    print(f"Failed: {failed}")
+    if failed > 0:
+        print(f"\nFailed files:")
+        for failed_file in failed_files[:10]:  # Show first 10
+            print(f"  - {failed_file}")
+        if len(failed_files) > 10:
+            print(f"  ... and {len(failed_files) - 10} more")
+    if landmark_indices is not None:
+        print(f"\nLandmark shape: ({len(landmark_indices)}, 2)")
+    else:
+        print(f"\nLandmark shape: (478, 2)")
+    print(f"Format: Normalized coordinates [0, 1] (same as PIPNet)")
+    print(f"Output saved to: {output_path}")
+    print("="*60 + "\n")
+    
+    # Raise error if all extractions failed
+    if successful == 0 and len(image_files) > 0:
+        raise RuntimeError(
+            "Failed to extract MediaPipe landmarks for any images. "
+            "This will cause tracking to fail if use_mediapipe_landmarks=True. "
+            "Please check the image quality and MediaPipe installation."
+        )
+
 
 
