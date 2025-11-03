@@ -18,6 +18,8 @@ For each input image (e.g., person_001.png), creates:
 """
 
 import os
+import random
+import time
 import sys
 import json
 import shutil
@@ -513,7 +515,13 @@ def process_single_image(image_path, output_dir, iters=800, keep_intermediate=Fa
     """Process a single image through the full pipeline."""
     vid_name = image_path.stem  # Filename without extension
     output_subdir = output_dir / vid_name
-    
+
+    # Check if output already exists (skip re-computation)
+    flame_params_file = output_subdir / "flame_parameters.json"
+    if flame_params_file.exists():
+        print(f"# Skipping: {image_path.name}")
+        return True
+
     # Create temporary directories for intermediate outputs
     import tempfile
     temp_base = Path(tempfile.mkdtemp(prefix=f"pixel3dmm_{vid_name}_"))
@@ -551,6 +559,7 @@ def process_single_image(image_path, output_dir, iters=800, keep_intermediate=Fa
     except Exception as e:
         print(f"\n✗ Error processing {image_path.name}: {str(e)}")
         import traceback
+
         traceback.print_exc()
         # Cleanup on error
         if temp_base.exists():
@@ -574,7 +583,8 @@ def inference_pixel3dmm(input_dir: str, output_dir: str, iters: int = 800, keep_
     # Setup
     output_dir = setup_output_dir(output_dir)
     image_files = get_image_files(input_dir)
-
+    random.seed(int(time.time()))
+    random.shuffle(image_files)  # Randomize processing order to avoid bias
     # Process each image
     results = []
     for i, image_path in enumerate(image_files, 1):
@@ -603,7 +613,6 @@ def inference_pixel3dmm(input_dir: str, output_dir: str, iters: int = 800, keep_
     
     print(f"\nOutputs saved to: {output_dir}")    
     return 0 if failed == 0 else 1
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
