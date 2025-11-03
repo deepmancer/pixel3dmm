@@ -14,7 +14,9 @@ with env.prefixed("PIXEL3DMM_"):
     PREPROCESSED_DATA = "/localhome/aha220/Hairdar/modules/pixel3dmm/preprocessed_data"
     TRACKING_OUTPUT = "/localhome/aha220/Hairdar/modules/pixel3dmm/tracking_output"
 
-
+# Hairdar root assets directory (parent of modules/)
+HAIRDAR_ROOT = "/localhome/aha220/Hairdar"
+ASSETS = f"{HAIRDAR_ROOT}/assets"
 
 head_template = f'{CODE_BASE}/assets/head_template.obj'
 head_template_color = f'{CODE_BASE}/assets/head_template_color.obj'
