@@ -121,7 +121,7 @@ WFLW_2_iBUG68 = np.array(
 WFLW_2_iBUG68 = torch.from_numpy(WFLW_2_iBUG68).cuda()
 
 # for debugging might to be set to False
-COMPILE = True
+COMPILE = False  # Temporarily disabled to avoid cached compilation issues with MediaPipe landmarks
 
 
 if COMPILE:
@@ -219,6 +219,25 @@ class Tracker(object):
         flame_mesh_mask = np.load(f'{env_paths.FLAME_ASSETS}/FLAME2020/FLAME_masks/FLAME_masks.pkl', allow_pickle=True, encoding='latin1')
         self.vertex_face_mask = torch.from_numpy(flame_mesh_mask['face']).cuda().long()
 
+        # Load MediaPipe landmark mapping for FLAME
+        self.use_mediapipe_landmarks = getattr(self.config, 'use_mediapipe_landmarks', False)
+        if self.use_mediapipe_landmarks:
+            mediapipe_mapping_path = f'{env_paths.ASSETS}/body_models/landmarks/flame/mediapipe_landmark_embedding.npz'
+            if os.path.exists(mediapipe_mapping_path):
+                print(f"Loading MediaPipe landmark mapping from {mediapipe_mapping_path}")
+                mediapipe_mapping = np.load(mediapipe_mapping_path)
+                # lmk_face_idx: face indices for each landmark
+                # lmk_b_coords: barycentric coordinates for each landmark
+                # landmark_indices: subset of 478 landmarks to use (105 landmarks)
+                self.mediapipe_lmk_face_idx = torch.from_numpy(mediapipe_mapping['lmk_face_idx']).cuda().long()
+                self.mediapipe_lmk_b_coords = torch.from_numpy(mediapipe_mapping['lmk_b_coords']).cuda().float()
+                self.mediapipe_landmark_indices = torch.from_numpy(mediapipe_mapping['landmark_indices']).cuda().long()
+                self.num_mediapipe_landmarks = len(self.mediapipe_lmk_face_idx)
+                print(f"Loaded MediaPipe mapping: {self.num_mediapipe_landmarks} landmarks")
+            else:
+                print(f"Warning: MediaPipe mapping file not found at {mediapipe_mapping_path}")
+                print("Disabling MediaPipe landmark support")
+                self.use_mediapipe_landmarks = False
 
         self.setup_renderer()
 
@@ -241,6 +260,52 @@ class Tracker(object):
     def get_image_size(self):
         return self.image_size[0][0].item(), self.image_size[0][1].item()
 
+    def compute_mediapipe_landmarks_3d(self, flame_vertices):
+        """
+        Compute 3D MediaPipe landmark positions from FLAME mesh vertices
+        using barycentric interpolation.
+        
+        Args:
+            flame_vertices: FLAME mesh vertices, shape [B, V, 3] or [V, 3]
+            
+        Returns:
+            landmarks_3d: MediaPipe landmark positions, shape [B, N, 3] or [N, 3]
+                         where N is the number of MediaPipe landmarks (typically 105)
+        """
+        if not self.use_mediapipe_landmarks:
+            return None
+            
+        # Handle both batched and unbatched inputs
+        if len(flame_vertices.shape) == 2:
+            flame_vertices = flame_vertices.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+            
+        B = flame_vertices.shape[0]
+        N = self.num_mediapipe_landmarks
+        
+        # Get the faces corresponding to each landmark
+        # Shape: [N, 3] - three vertex indices per face
+        landmark_faces = self.flame.faces[self.mediapipe_lmk_face_idx]  # [N, 3]
+        
+        # Get the vertices for each landmark's face
+        # Shape: [B, N, 3, 3] - (batch, landmarks, vertices_per_face, xyz)
+        landmark_face_vertices = flame_vertices[:, landmark_faces]  # [B, N, 3, 3]
+        
+        # Apply barycentric interpolation
+        # lmk_b_coords shape: [N, 3] - barycentric weights for each landmark
+        # Expand for batch: [1, N, 3, 1]
+        bary_weights = self.mediapipe_lmk_b_coords.unsqueeze(0).unsqueeze(-1)  # [1, N, 3, 1]
+        
+        # Weighted sum: sum over the 3 vertices of each face
+        # [B, N, 3, 3] * [1, N, 3, 1] -> [B, N, 3, 3] -> sum(dim=2) -> [B, N, 3]
+        landmarks_3d = (landmark_face_vertices * bary_weights).sum(dim=2)
+        
+        if squeeze_output:
+            landmarks_3d = landmarks_3d.squeeze(0)
+            
+        return landmarks_3d
 
     def create_output_folders(self):
         Path(self.save_folder).mkdir(parents=True, exist_ok=True)
@@ -251,7 +316,15 @@ class Tracker(object):
     def setup_renderer(self):
         mesh_file = f'{env_paths.head_template}'
         self.config.image_size = self.get_image_size()
-        self.flame = FLAME(self.config).to(self.device)
+        
+        # Pass MediaPipe landmark data to FLAME if available
+        if self.use_mediapipe_landmarks:
+            self.flame = FLAME(self.config, 
+                             mediapipe_lmk_face_idx=self.mediapipe_lmk_face_idx,
+                             mediapipe_lmk_b_coords=self.mediapipe_lmk_b_coords).to(self.device)
+        else:
+            self.flame = FLAME(self.config).to(self.device)
+        
         self.flame.vertex_face_mask = self.vertex_face_mask
 
 
@@ -401,13 +474,6 @@ class Tracker(object):
             
             np.save(f'{self.checkpoint_folder}/{frame_id:05d}_head_orientation.npy', frame['flame']['head_orientation'])
             
-            if b_i == 0:
-                print(f"Frame {frame_id} Head Orientation:")
-                print(f"  Forward Vector: {frame['flame']['head_orientation']['forward_vector'][0]}")
-                print(f"  Euler Angles (deg): pitch={np.rad2deg(frame['flame']['head_orientation']['euler_angles_xyz'][0, 0]):.2f}, "
-                      f"yaw={np.rad2deg(frame['flame']['head_orientation']['euler_angles_xyz'][0, 1]):.2f}, "
-                      f"roll={np.rad2deg(frame['flame']['head_orientation']['euler_angles_xyz'][0, 2]):.2f}")
-
             selction_indx = np.array([36, 39, 42, 45, 33, 48, 54])
             _lmks = lmks[b_i].detach().squeeze().cpu().numpy()
 
@@ -705,6 +771,26 @@ class Tracker(object):
             losses['pp_reg'] = torch.sum(self.principal_point ** 2)
             if k <= steps // 2:
                 losses['lmk68'] = util.lmk_loss(lmk68_screen_space[..., :2], landmarks[..., :2], [h, w], lmk_mask) * 3000
+                
+                # Add MediaPipe landmarks for camera optimization
+                if self.use_mediapipe_landmarks and hasattr(self.config, 'w_lmks_mediapipe_cam') and self.config.w_lmks_mediapipe_cam > 0:
+                    if batch is not None and batch.get('mediapipe_lmk') is not None and batch.get('mediapipe_lmk_mask') is not None:
+                        # Compute 3D MediaPipe landmarks from FLAME vertices
+                        mediapipe_lmk_3d = self.compute_mediapipe_landmarks_3d(verts)  # [B, 105, 3]
+                        
+                        # Project to 2D screen space
+                        mediapipe_lmk_screen_space = project_points_screen_space(
+                            mediapipe_lmk_3d, self.focal_length, self.principal_point, 
+                            self.R_base, self.t_base, size=self.config.size
+                        )
+                        
+                        # Compute reprojection loss
+                        losses['lmk_mediapipe'] = util.lmk_loss(
+                            mediapipe_lmk_screen_space[..., :2], 
+                            batch['mediapipe_lmk'][..., :2], 
+                            [h, w], 
+                            batch['mediapipe_lmk_mask']
+                        ) * self.config.w_lmks_mediapipe_cam
 
             if k == 0:
                 self.uv_loss_fn.compute_corresp(uv_map)
@@ -966,6 +1052,30 @@ class Tracker(object):
             losses['loss/lmk_iris_right'] = util.lmk_loss(proj_vertices[:, right_iris_flame[:1], ..., :2], right_iris,
                                                           image_size,
                                                           mask_right_iris) * self.config.w_lmks_iris * lmk_scale * 50.0
+
+        # MediaPipe landmark loss (105 landmarks)
+        if self.use_mediapipe_landmarks and hasattr(self.config, 'w_lmks_mediapipe') and self.config.w_lmks_mediapipe > 0:
+            if batch is not None and batch.get('mediapipe_lmk') is not None and batch.get('mediapipe_lmk_mask') is not None:
+                # Compute 3D MediaPipe landmarks from FLAME vertices
+                mediapipe_lmk_3d = self.compute_mediapipe_landmarks_3d(vertices)  # [B, 105, 3]
+                
+                # Project to 2D screen space
+                proj_mediapipe_lmk = project_points_screen_space(
+                    mediapipe_lmk_3d, focal_length, principal_point, 
+                    self.R_base, self.t_base, size=self.config.size
+                )  # [B, 105, 3] (x, y, depth)
+                
+                # Get 2D predictions from batch
+                image_mediapipe_lmk = batch['mediapipe_lmk']  # [B, 105, 2]
+                mediapipe_lmk_mask = batch['mediapipe_lmk_mask']  # [B, 105, 1]
+                
+                # Compute reprojection loss
+                losses['loss/lmk_mediapipe'] = util.lmk_loss(
+                    proj_mediapipe_lmk[..., :2], 
+                    image_mediapipe_lmk, 
+                    image_size,
+                    mediapipe_lmk_mask
+                ) * self.config.w_lmks_mediapipe * lmk_scale
 
         # Reguralizers
         losses['reg/exp'] = torch.sum(exp ** 2, dim=-1).mean() * self.config.w_exp
@@ -1553,6 +1663,25 @@ class Tracker(object):
         else:
             landmarks = lmk_mask = None
 
+        # Load MediaPipe landmarks if enabled
+        if self.use_mediapipe_landmarks:
+            if 'mediapipe_lmk' not in batch or batch['mediapipe_lmk'] is None:
+                raise ValueError(
+                    "MediaPipe landmarks are enabled (use_mediapipe_landmarks=True) but not found in batch. "
+                    "Please ensure MediaPipe landmarks are extracted during preprocessing. "
+                    "Check that 'mediapipe_landmarks' folder exists in your preprocessed data directory."
+                )
+            mediapipe_lmk = batch['mediapipe_lmk']  # Shape: [B, 105, 2]
+            # Create mask for valid landmarks (non-zero)
+            mediapipe_lmk_mask = ~(mediapipe_lmk.sum(2, keepdim=True) == 0)
+            batch['mediapipe_lmk'] = mediapipe_lmk
+            batch['mediapipe_lmk_mask'] = mediapipe_lmk_mask
+        else:
+            # MediaPipe disabled - set to None if not in batch
+            if 'mediapipe_lmk' not in batch:
+                batch['mediapipe_lmk'] = None
+                batch['mediapipe_lmk_mask'] = None
+
         return images,  landmarks, lmk_mask,
 
 
@@ -1611,6 +1740,20 @@ class Tracker(object):
         except Exception as ex:
             lms = np.zeros([98, 2])
 
+        # Load MediaPipe landmarks if enabled
+        mediapipe_lmk = None
+        if self.use_mediapipe_landmarks:
+            mediapipe_lmk_path = f'{DATA_FOLDER}/mediapipe_landmarks/mediapipe_lmk_{timestep:05d}.npy'
+            if os.path.exists(mediapipe_lmk_path):
+                try:
+                    # MediaPipe landmarks are extracted from cropped images on disk
+                    # which are 512x512 (same as PIPNet landmarks)
+                    # Scale them the same way as PIPNet landmarks: multiply by self.config.size
+                    mediapipe_lmk = np.load(mediapipe_lmk_path) * self.config.size
+                except Exception as ex:
+                    print(f"Warning: Failed to load MediaPipe landmarks for frame {timestep}: {ex}")
+                    mediapipe_lmk = None
+
         ret_dict = {
             'rgb': rgb,
             'mica_shape': mica_shape,
@@ -1623,6 +1766,8 @@ class Tracker(object):
         }
         if lms is not None:
             ret_dict['lmk'] = lms
+        if mediapipe_lmk is not None:
+            ret_dict['mediapipe_lmk'] = mediapipe_lmk
 
 
         ret_dict = {k: torch.from_numpy(v).float().unsqueeze(0).cuda() for k,v in ret_dict.items()}
@@ -1695,7 +1840,7 @@ class Tracker(object):
                 else:
                     self.cached_data[k].append(batch[k])
             if timestep == self.config.start_frame:
-                self.optimize_camera(batch, steps=500, is_first_frame=True)
+                self.optimize_camera(batch, steps=1000, is_first_frame=True)
                 #params = lambda: self.clone_params_keyframes_all(freeze_id=self.config.is_discontinuous, freeze_cam=self.config.global_camera, include_neck=self.config.include_neck)
                 params = lambda: self.clone_params_keyframes_all(freeze_id=not (self.MAX_STEPS==1), freeze_cam=self.config.global_camera, include_neck=self.config.include_neck)
                 is_first_step = True
