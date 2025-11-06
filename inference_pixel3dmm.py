@@ -69,21 +69,34 @@ def setup_output_dir(output_dir):
 
 
 def get_image_files(input_dir):
-    """Get all PNG and JPG images from input directory."""
-    input_dir = Path(input_dir).resolve()  # Convert to absolute path
-    if not input_dir.exists():
-        raise ValueError(f"Input directory does not exist: {input_dir}")
+    """Get all PNG and JPG images from input directory, or single image file."""
+    input_path = Path(input_dir).resolve()  # Convert to absolute path
+    if not input_path.exists():
+        raise ValueError(f"Input path does not exist: {input_path}")
     
-    image_files = []
-    for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
-        image_files.extend(input_dir.glob(ext))
+    # If input is a file, return it directly
+    if input_path.is_file():
+        ext = input_path.suffix.lower()
+        if ext in ['.png', '.jpg', '.jpeg']:
+            return [input_path]
+        else:
+            raise ValueError(f"Input file must be PNG, JPG, or JPEG, got: {ext}")
     
-    image_files = sorted(image_files)
+    # If input is a directory, find all images
+    if input_path.is_dir():
+        image_files = []
+        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
+            image_files.extend(input_path.glob(ext))
+        
+        image_files = sorted(image_files)
+        
+        if not image_files:
+            raise ValueError(f"No image files (PNG/JPG) found in: {input_path}")
+        
+        return image_files
     
-    if not image_files:
-        raise ValueError(f"No image files (PNG/JPG) found in: {input_dir}")
-    
-    return image_files
+    raise ValueError(f"Input path is neither a file nor a directory: {input_path}")
+
 
 
 def run_preprocessing(image_path, output_dir):
