@@ -95,7 +95,9 @@ def main(vid_name : str,
     pl.show()
 
     if DO_PROJECTION_TEST:
-        mediapy.write_video(f'{tracking_dir}/projection_test.mp4', images=vid_frames)
+        # Video export disabled
+        # mediapy.write_video(f'{tracking_dir}/projection_test.mp4', images=vid_frames, codec='libx264')
+        pass
 
 
 

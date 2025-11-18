@@ -8,6 +8,15 @@ from PIL import Image
 from omegaconf import OmegaConf
 from time import time
 
+# Monkey-patch torch.load to use weights_only=False for compatibility with PyTorch 2.6+
+# This is safe for trusted checkpoint files from this project
+_original_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
+
 from pixel3dmm.utils.uv import uv_pred_to_mesh
 from pixel3dmm.lightning.p3dmm_system import system as p3dmm_system
 #from pixel3dmm.lightning.system_flame_params_legacy import system as system_flame_params_legacy

@@ -10,9 +10,9 @@ if env_file_path.exists():
 
 
 with env.prefixed("PIXEL3DMM_"):
-    CODE_BASE = env("CODE_BASE")
-    PREPROCESSED_DATA = env("PREPROCESSED_DATA")
-    TRACKING_OUTPUT = env("TRACKING_OUTPUT")
+    CODE_BASE = "/localhome/aha220/Hairdar/modules/pixel3dmm/"
+    PREPROCESSED_DATA = "/localhome/aha220/Hairdar/modules/pixel3dmm/preprocessed_data"
+    TRACKING_OUTPUT = "/localhome/aha220/Hairdar/modules/pixel3dmm/tracking_output"
 
 
 
@@ -28,6 +28,11 @@ FLAME_UV_COORDS = f'{CODE_BASE}/assets/flame_uv_coords.npy'
 VALID_VERTS_NARROW = f'{CODE_BASE}/assets/uv_valid_verty_noEyes.npy'
 VALID_VERTS = f'{CODE_BASE}/assets/uv_valid_verty_noEyes_noEyeRegion_debug_wEars.npy'
 FLAME_ASSETS = f'{CODE_BASE}/src/pixel3dmm/preprocessing/MICA/data/'
+
+# FLAME model paths (from main Hairdar assets)
+FLAME_MODEL_PATH = '/localhome/aha220/Hairdar/assets/body_models/base_models/flame/parametric_models'
+FLAME_GENERIC_MODEL = f'{FLAME_MODEL_PATH}/generic_model.pkl'
+FLAME_2020_PATH = f'{CODE_BASE}/src/pixel3dmm/preprocessing/MICA/data/FLAME2020'
 
 # paths to pretrained pixel3dmm checkpoints
 CKPT_UV_PRED = f'{CODE_BASE}/pretrained_weights/uv.ckpt'
