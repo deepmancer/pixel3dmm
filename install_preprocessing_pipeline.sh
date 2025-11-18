@@ -23,7 +23,7 @@ cd ..
 
 
 # PIPnet
-git clone https://github.com/jhb86253817/PIPNet.git
+git clone https://github.com/deepmancer/PIPNet.git
 cd PIPNet
 cd FaceBoxesV2/utils
 sh make.sh
@@ -32,8 +32,8 @@ mkdir snapshots
 mkdir snapshots/WFLW/
 mkdir snapshots/WFLW/pip_32_16_60_r18_l2_l1_10_1_nb10/
 gdown --id 1nVkaSbxy3NeqblwMTGvLg4nF49cI_99C -O snapshots/WFLW/pip_32_16_60_r18_l2_l1_10_1_nb10/epoch59.pth
-#mkdir snapshots/WFLW/pip_32_16_60_r101_l2_l1_10_1_nb10/
-#gdown --id 1Jb97z5Z5ca61-6W2RDOK0e2w_RlbeWgS -O snapshots/WFLW/pip_32_16_60_r101_l2_l1_10_1_nb10/epoch59.pth
+mkdir snapshots/WFLW/pip_32_16_60_r101_l2_l1_10_1_nb10/
+gdown --id 1Jb97z5Z5ca61-6W2RDOK0e2w_RlbeWgS -O snapshots/WFLW/pip_32_16_60_r101_l2_l1_10_1_nb10/epoch59.pth
 
 
 cd ../../../../
