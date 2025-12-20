@@ -134,7 +134,7 @@ class Tracker(object):
                  ):
         self.config = config
         self.device = device
-        self.actor_name = self.config.video_name
+        self.actor_name = str(self.config.video_name)
         
         # Use provided preprocessed_dir or default to env_paths
         if hasattr(config, 'preprocessed_dir') and config.preprocessed_dir is not None:
@@ -225,7 +225,7 @@ class Tracker(object):
             mediapipe_mapping_path = f'{env_paths.ASSETS}/body_models/landmarks/flame/mediapipe_landmark_embedding.npz'
             if os.path.exists(mediapipe_mapping_path):
                 print(f"Loading MediaPipe landmark mapping from {mediapipe_mapping_path}")
-                mediapipe_mapping = np.load(mediapipe_mapping_path)
+                mediapipe_mapping = np.load(mediapipe_mapping_path, allow_pickle=True)
                 # lmk_face_idx: face indices for each landmark
                 # lmk_b_coords: barycentric coordinates for each landmark
                 # landmark_indices: subset of 478 landmarks to use (105 landmarks)

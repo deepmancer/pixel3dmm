@@ -69,21 +69,35 @@ def setup_output_dir(output_dir):
 
 
 def get_image_files(input_dir):
-    """Get all PNG and JPG images from input directory."""
-    input_dir = Path(input_dir).resolve()  # Convert to absolute path
-    if not input_dir.exists():
-        raise ValueError(f"Input directory does not exist: {input_dir}")
+    """Get all PNG and JPG images from input directory, or a single image file if a file path is provided."""
+    input_path = Path(input_dir).resolve()  # Convert to absolute path
+    if not input_path.exists():
+        raise ValueError(f"Input path does not exist: {input_path}")
+    
+    # If input_path is a file, return it directly
+    if input_path.is_file():
+        # Validate it's an image file
+        valid_extensions = {'.png', '.jpg', '.jpeg'}
+        if input_path.suffix.lower() in valid_extensions:
+            return [input_path]
+        else:
+            raise ValueError(f"File is not a valid image (PNG/JPG): {input_path}")
+    
+    # If input_path is a directory, find all images
+    if not input_path.is_dir():
+        raise ValueError(f"Input path is neither a file nor a directory: {input_path}")
     
     image_files = []
     for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
-        image_files.extend(input_dir.glob(ext))
+        image_files.extend(input_path.glob(ext))
     
     image_files = sorted(image_files)
     
     if not image_files:
-        raise ValueError(f"No image files (PNG/JPG) found in: {input_dir}")
+        raise ValueError(f"No image files (PNG/JPG) found in: {input_path}")
     
     return image_files
+
 
 
 def run_preprocessing(image_path, output_dir):
@@ -583,6 +597,7 @@ def inference_pixel3dmm(input_dir: str, output_dir: str, iters: int = 800, keep_
     # Setup
     output_dir = setup_output_dir(output_dir)
     image_files = get_image_files(input_dir)
+    print(image_files)
     random.seed(int(time.time()))
     random.shuffle(image_files)  # Randomize processing order to avoid bias
     # Process each image
