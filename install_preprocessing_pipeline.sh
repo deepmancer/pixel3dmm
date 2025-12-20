@@ -11,7 +11,7 @@ pip install -e .
 cd ..
 
 # MICA
-git clone git@github.com:Zielon/MICA.git
+git clone git@github.com:deepmancer/MICA.git
 cd MICA
 cp ../replacement_code/install_mica_download_flame.sh install.sh
 cp ../replacement_code/mica_demo.py demo.py
@@ -21,9 +21,8 @@ cd ..
 
 #TODO: Maybe need to copy these flame weights to trackign/FLAME as well, or ideally adjust some paths instead
 
-
 # PIPnet
-git clone https://github.com/jhb86253817/PIPNet.git
+git clone https://github.com/deepmancer/PIPNet.git
 cd PIPNet
 cd FaceBoxesV2/utils
 sh make.sh
@@ -32,8 +31,8 @@ mkdir snapshots
 mkdir snapshots/WFLW/
 mkdir snapshots/WFLW/pip_32_16_60_r18_l2_l1_10_1_nb10/
 gdown --id 1nVkaSbxy3NeqblwMTGvLg4nF49cI_99C -O snapshots/WFLW/pip_32_16_60_r18_l2_l1_10_1_nb10/epoch59.pth
-#mkdir snapshots/WFLW/pip_32_16_60_r101_l2_l1_10_1_nb10/
-#gdown --id 1Jb97z5Z5ca61-6W2RDOK0e2w_RlbeWgS -O snapshots/WFLW/pip_32_16_60_r101_l2_l1_10_1_nb10/epoch59.pth
+mkdir snapshots/WFLW/pip_32_16_60_r101_l2_l1_10_1_nb10/
+gdown --id 1Jb97z5Z5ca61-6W2RDOK0e2w_RlbeWgS -O snapshots/WFLW/pip_32_16_60_r101_l2_l1_10_1_nb10/epoch59.pth
 
 
 cd ../../../../

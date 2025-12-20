@@ -10,12 +10,12 @@ if env_file_path.exists():
 
 
 with env.prefixed("PIXEL3DMM_"):
-    CODE_BASE = "/localhome/aha220/Hairdar/modules/pixel3dmm/"
-    PREPROCESSED_DATA = "/localhome/aha220/Hairdar/modules/pixel3dmm/preprocessed_data"
-    TRACKING_OUTPUT = "/localhome/aha220/Hairdar/modules/pixel3dmm/tracking_output"
+    CODE_BASE = "/workspace/HairPort/Hairdar/modules/pixel3dmm/"
+    PREPROCESSED_DATA = "/workspace/HairPort/Hairdar/modules/pixel3dmm/preprocessed_data"
+    TRACKING_OUTPUT = "/workspace/HairPort/Hairdar/modules/pixel3dmm/tracking_output"
 
 # Hairdar root assets directory (parent of modules/)
-HAIRDAR_ROOT = "/localhome/aha220/Hairdar"
+HAIRDAR_ROOT = "/workspace/HairPort/Hairdar"
 ASSETS = f"{HAIRDAR_ROOT}/assets"
 
 head_template = f'{CODE_BASE}/assets/head_template.obj'
@@ -32,7 +32,7 @@ VALID_VERTS = f'{CODE_BASE}/assets/uv_valid_verty_noEyes_noEyeRegion_debug_wEars
 FLAME_ASSETS = f'{CODE_BASE}/src/pixel3dmm/preprocessing/MICA/data/'
 
 # FLAME model paths (from main Hairdar assets)
-FLAME_MODEL_PATH = '/localhome/aha220/Hairdar/assets/body_models/base_models/flame/parametric_models'
+FLAME_MODEL_PATH = '/workspace/HairPort/Hairdar/assets/body_models/base_models/flame/parametric_models'
 FLAME_GENERIC_MODEL = f'{FLAME_MODEL_PATH}/generic_model.pkl'
 FLAME_2020_PATH = f'{CODE_BASE}/src/pixel3dmm/preprocessing/MICA/data/FLAME2020'
 

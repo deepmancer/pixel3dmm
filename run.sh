@@ -1,8 +1,8 @@
-export PYTHONPATH="/localhome/aha220/Hairdar/modules/pixel3dmm/src:$PYTHONPATH"
+export PYTHONPATH="/workspace/HairPort/Hairdar/modules/pixel3dmm/src:$PYTHONPATH"
 source ~/anaconda3/bin/activate
 conda activate clip
 
-PATH_TO_VIDEO="/localhome/aha220/Hairdar/modules/pixel3dmm/examplesss/hair_132.jpg"
+PATH_TO_VIDEO="/workspace/HairPort/Hairdar/modules/pixel3dmm/examplesss/hair_132.jpg"
 base_name=$(basename $PATH_TO_VIDEO)
 VID_NAME="${base_name%%.*}"
 
