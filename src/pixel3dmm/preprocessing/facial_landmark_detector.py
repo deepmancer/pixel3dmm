@@ -7,6 +7,7 @@ import cv2
 
 
 class FacialLandmarkDetector:
+    """Robust facial landmark detector using MediaPipe with fallback strategies."""
     
     # MediaPipe 478 to Dlib 68 correspondence mapping
     MP2DLIB_CORRESPONDENCE = [
@@ -106,7 +107,12 @@ class FacialLandmarkDetector:
         refine_landmarks: bool = True,
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
-        mediapipe_flame_embedding_path: str = "assets/body_models/landmarks/flame/mediapipe_landmark_embedding.npz"
+        mediapipe_flame_embedding_path: str = "assets/body_models/landmarks/flame/mediapipe_landmark_embedding.npz",
+        enable_fallback: bool = True,
+        fallback_confidence_thresholds: Tuple[float, ...] = (0.3, 0.2, 0.1),
+        enable_preprocessing: bool = True,
+        min_face_size: int = 64,
+        target_face_size: int = 256
     ):
         self.static_image_mode = static_image_mode
         self.max_num_faces = max_num_faces
@@ -114,6 +120,11 @@ class FacialLandmarkDetector:
         self.min_detection_confidence = min_detection_confidence
         self.min_tracking_confidence = min_tracking_confidence
         self.mediapipe_flame_embedding_path = mediapipe_flame_embedding_path
+        self.enable_fallback = enable_fallback
+        self.fallback_confidence_thresholds = fallback_confidence_thresholds
+        self.enable_preprocessing = enable_preprocessing
+        self.min_face_size = min_face_size
+        self.target_face_size = target_face_size
         
         # Initialize MediaPipe Face Mesh
         self.mp_face_mesh = mp.solutions.face_mesh
@@ -125,10 +136,27 @@ class FacialLandmarkDetector:
             min_tracking_confidence=self.min_tracking_confidence
         )
         
-        # Initialize MediaPipe Face Detection
+        # Create fallback face mesh instances with lower confidence thresholds
+        self.fallback_face_meshes = []
+        if self.enable_fallback:
+            for conf in self.fallback_confidence_thresholds:
+                fm = self.mp_face_mesh.FaceMesh(
+                    static_image_mode=True,
+                    max_num_faces=self.max_num_faces,
+                    refine_landmarks=self.refine_landmarks,
+                    min_detection_confidence=conf,
+                    min_tracking_confidence=conf
+                )
+                self.fallback_face_meshes.append(fm)
+        
+        # Initialize MediaPipe Face Detection (both short-range and full-range models)
         self.mp_face_detection = mp.solutions.face_detection
         self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=1,
+            model_selection=1,  # Full-range model (0-5m)
+            min_detection_confidence=self.min_detection_confidence
+        )
+        self.face_detection_short = self.mp_face_detection.FaceDetection(
+            model_selection=0,  # Short-range model (0-2m, better for close-ups)
             min_detection_confidence=self.min_detection_confidence
         )
         
@@ -152,6 +180,11 @@ class FacialLandmarkDetector:
             self.face_mesh.close()
         if hasattr(self, 'face_detection'):
             self.face_detection.close()
+        if hasattr(self, 'face_detection_short'):
+            self.face_detection_short.close()
+        if hasattr(self, 'fallback_face_meshes'):
+            for fm in self.fallback_face_meshes:
+                fm.close()
     
     def _load_mediapipe_flame_mapping(self):
         try:
@@ -171,8 +204,186 @@ class FacialLandmarkDetector:
             print(f"Error loading MediaPipe-FLAME mapping: {e}")
             self.mediapipe_flame_mapping = None
     
+    def _enhance_image(self, image_array: np.ndarray) -> np.ndarray:
+        """Apply adaptive preprocessing to improve detection on difficult images."""
+        # Convert to LAB color space for luminance-based enhancement
+        lab = cv2.cvtColor(image_array, cv2.COLOR_RGB2LAB)
+        l_channel = lab[:, :, 0]
+        
+        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to L channel
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(l_channel)
+        
+        # Convert back to RGB
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        return enhanced
+    
+    def _get_face_crop_params(
+        self,
+        image_array: np.ndarray,
+        padding_ratio: float = 0.3
+    ) -> Optional[Tuple[int, int, int, int, float]]:
+        """Detect face and compute crop parameters with padding."""
+        height, width = image_array.shape[:2]
+        
+        # Try full-range model first, then short-range
+        for detector in [self.face_detection, self.face_detection_short]:
+            results = detector.process(image_array)
+            if results.detections:
+                bbox = results.detections[0].location_data.relative_bounding_box
+                
+                # Convert to pixel coordinates with padding
+                face_w = int(bbox.width * width)
+                face_h = int(bbox.height * height)
+                face_x = int(bbox.xmin * width)
+                face_y = int(bbox.ymin * height)
+                
+                # Add padding
+                pad_w = int(face_w * padding_ratio)
+                pad_h = int(face_h * padding_ratio)
+                
+                x1 = max(0, face_x - pad_w)
+                y1 = max(0, face_y - pad_h)
+                x2 = min(width, face_x + face_w + pad_w)
+                y2 = min(height, face_y + face_h + pad_h)
+                
+                # Compute scale factor if face is small
+                face_size = max(x2 - x1, y2 - y1)
+                scale = max(1.0, self.target_face_size / face_size) if face_size < self.min_face_size else 1.0
+                
+                return (x1, y1, x2, y2, scale)
+        
+        return None
+    
+    def _process_with_fallback(
+        self,
+        image_array: np.ndarray
+    ) -> Optional[any]:
+        """Try detection with progressively lower confidence thresholds."""
+        # Try primary detector first
+        results = self.face_mesh.process(image_array)
+        if results.multi_face_landmarks:
+            return results
+        
+        # Try fallback detectors with lower confidence
+        for fm in self.fallback_face_meshes:
+            results = fm.process(image_array)
+            if results.multi_face_landmarks:
+                return results
+        
+        return None
+    
+    def _detect_landmarks_robust(
+        self,
+        image_array: np.ndarray,
+        original_height: int,
+        original_width: int
+    ) -> Optional[any]:
+        """Robust landmark detection with multiple strategies."""
+        height, width = image_array.shape[:2]
+        
+        # Strategy 1: Direct detection on original image
+        results = self._process_with_fallback(image_array)
+        if results and results.multi_face_landmarks:
+            return results, None
+        
+        if not self.enable_preprocessing:
+            return None, None
+        
+        # Strategy 2: Enhanced image (CLAHE)
+        enhanced = self._enhance_image(image_array)
+        results = self._process_with_fallback(enhanced)
+        if results and results.multi_face_landmarks:
+            return results, None
+        
+        # Strategy 3: Face-crop based detection for small/distant faces
+        crop_params = self._get_face_crop_params(image_array)
+        if crop_params is not None:
+            x1, y1, x2, y2, scale = crop_params
+            face_crop = image_array[y1:y2, x1:x2]
+            
+            # Upscale if face is small
+            if scale > 1.0:
+                new_w = int((x2 - x1) * scale)
+                new_h = int((y2 - y1) * scale)
+                face_crop = cv2.resize(face_crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            
+            results = self._process_with_fallback(face_crop)
+            if results and results.multi_face_landmarks:
+                # Return crop parameters for coordinate transformation
+                return results, (x1, y1, x2, y2, scale)
+            
+            # Try enhanced version of crop
+            enhanced_crop = self._enhance_image(face_crop)
+            results = self._process_with_fallback(enhanced_crop)
+            if results and results.multi_face_landmarks:
+                return results, (x1, y1, x2, y2, scale)
+        
+        # Strategy 4: Multi-scale detection
+        for scale_factor in [1.5, 2.0, 0.75]:
+            new_w = int(width * scale_factor)
+            new_h = int(height * scale_factor)
+            if new_w < 64 or new_h < 64:
+                continue
+            
+            scaled = cv2.resize(image_array, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            results = self._process_with_fallback(scaled)
+            if results and results.multi_face_landmarks:
+                return results, ('scale', scale_factor)
+        
+        return None, None
+    
+    def _transform_landmarks_to_original(
+        self,
+        landmarks: np.ndarray,
+        transform_params: Optional[Tuple],
+        original_height: int,
+        original_width: int,
+        processed_height: int,
+        processed_width: int
+    ) -> np.ndarray:
+        """Transform landmarks back to original image coordinates."""
+        if transform_params is None:
+            return landmarks
+        
+        transformed = landmarks.copy()
+        
+        if isinstance(transform_params[0], str) and transform_params[0] == 'scale':
+            # Simple scaling case
+            scale_factor = transform_params[1]
+            transformed[:, 0] /= scale_factor
+            transformed[:, 1] /= scale_factor
+            if transformed.shape[1] == 3:
+                transformed[:, 2] /= scale_factor
+        else:
+            # Crop + optional scale case
+            x1, y1, x2, y2, scale = transform_params
+            crop_w = x2 - x1
+            crop_h = y2 - y1
+            
+            if scale > 1.0:
+                # First undo the upscaling
+                transformed[:, 0] /= scale
+                transformed[:, 1] /= scale
+                if transformed.shape[1] == 3:
+                    transformed[:, 2] /= scale
+            
+            # Then add crop offset
+            transformed[:, 0] += x1
+            transformed[:, 1] += y1
+        
+        return transformed
+    
     def convert_mediapipe_to_dlib68(self, lmks_mp: np.ndarray) -> np.ndarray:
+        """Convert MediaPipe 478 landmarks to Dlib 68 format using MP2DLIB_CORRESPONDENCE.
+        
+        Args:
+            lmks_mp: MediaPipe landmarks, shape (478, 2) or (478, 3)
+        Returns:
+            Dlib 68 landmarks, shape (68, 2) or (68, 3)
+        """
         # Convert landmarks by averaging corresponding MediaPipe indices
+        # This works for both 2D (N, 2) and 3D (N, 3) landmark arrays
         lmks_dlib = np.array([
             lmks_mp[indices].mean(axis=0) 
             for indices in self.mp2dlib_correspondence_normalized
@@ -181,6 +392,13 @@ class FacialLandmarkDetector:
         return lmks_dlib
     
     def get_mediapipe_flame_subset(self, lmks_mp: np.ndarray) -> Optional[np.ndarray]:
+        """Extract FLAME-aligned 105 landmarks from MediaPipe 478 using pre-computed indices.
+        
+        Args:
+            lmks_mp: MediaPipe landmarks, shape (478, 2) or (478, 3)
+        Returns:
+            FLAME landmarks, shape (105, 2) or (105, 3), or None if mapping unavailable
+        """
         if self.mediapipe_flame_mapping is None:
             return None
         
@@ -192,16 +410,23 @@ class FacialLandmarkDetector:
         image: Union[str, Path, np.ndarray, Image.Image],
         face_index: int = 0
     ) -> Optional[dict]:
+        """Detect facial landmarks with fallback strategies. Returns all formats in 2D and 3D.
+        
+        Returns dict with keys:
+            2D: ldm478, ldm468, ldm68, ldm105_flame (pixel coords in original image space)
+            3D: ldm478_3d, ldm468_3d, ldm68_3d, ldm105_flame_3d (pixel coords + depth)
+            Meta: image_height, image_width
+        """
         try:
             # Preprocess image
             image_array, height, width = self._preprocess_image(image)
             
-            # Detect landmarks using MediaPipe
-            results = self.face_mesh.process(image_array)
+            # Robust detection with fallback strategies
+            results, transform_params = self._detect_landmarks_robust(image_array, height, width)
             
             # Check if any faces were detected
-            if not results.multi_face_landmarks:
-                print("Warning: No faces detected in the image")
+            if results is None or not results.multi_face_landmarks:
+                print("Warning: No faces detected in the image after all fallback strategies")
                 return None
             
             # Check if requested face index is valid
@@ -216,20 +441,61 @@ class FacialLandmarkDetector:
             # Extract landmarks for the specified face
             face_landmarks = results.multi_face_landmarks[face_index]
             
-            ldm478 = np.zeros((478, 2), dtype=np.float32)
-            for idx, landmark in enumerate(face_landmarks.landmark):
-                ldm478[idx, 0] = landmark.x * width
-                ldm478[idx, 1] = landmark.y * height
+            # Determine processed image dimensions for landmark extraction
+            if transform_params is None:
+                proc_height, proc_width = height, width
+            elif isinstance(transform_params[0], str) and transform_params[0] == 'scale':
+                scale_factor = transform_params[1]
+                proc_width = int(width * scale_factor)
+                proc_height = int(height * scale_factor)
+            else:
+                x1, y1, x2, y2, scale = transform_params
+                proc_width = int((x2 - x1) * scale) if scale > 1.0 else (x2 - x1)
+                proc_height = int((y2 - y1) * scale) if scale > 1.0 else (y2 - y1)
             
+            # Extract raw landmarks in processed image coordinates
+            ldm478 = np.zeros((478, 2), dtype=np.float32)
+            ldm478_3d = np.zeros((478, 3), dtype=np.float32)
+            
+            for idx, landmark in enumerate(face_landmarks.landmark):
+                ldm478[idx, 0] = landmark.x * proc_width
+                ldm478[idx, 1] = landmark.y * proc_height
+                ldm478_3d[idx, 0] = landmark.x * proc_width
+                ldm478_3d[idx, 1] = landmark.y * proc_height
+                ldm478_3d[idx, 2] = landmark.z * proc_width
+            
+            # Transform back to original image coordinates
+            ldm478 = self._transform_landmarks_to_original(
+                ldm478, transform_params, height, width, proc_height, proc_width
+            )
+            ldm478_3d = self._transform_landmarks_to_original(
+                ldm478_3d, transform_params, height, width, proc_height, proc_width
+            )
+            
+            # Derive ldm468 (without iris landmarks)
             ldm468 = ldm478[:468].copy()
+            ldm468_3d = ldm478_3d[:468].copy()
+            
+            # Convert to Dlib 68-point format
             ldm68 = self.convert_mediapipe_to_dlib68(ldm478)
+            ldm68_3d = self.convert_mediapipe_to_dlib68(ldm478_3d)
+            
+            # Extract FLAME-aligned 105 landmarks
             ldm105_flame = self.get_mediapipe_flame_subset(ldm478)
+            ldm105_flame_3d = self.get_mediapipe_flame_subset(ldm478_3d)
             
             return {
+                # 2D landmarks (pixel coordinates in original image)
                 'ldm478': ldm478,
                 'ldm468': ldm468,
-                'ldm105_flame': ldm105_flame,
                 'ldm68': ldm68,
+                'ldm105_flame': ldm105_flame,
+                # 3D landmarks (pixel coordinates with depth)
+                'ldm478_3d': ldm478_3d,
+                'ldm468_3d': ldm468_3d,
+                'ldm68_3d': ldm68_3d,
+                'ldm105_flame_3d': ldm105_flame_3d,
+                # Image metadata
                 'image_height': height,
                 'image_width': width
             }
@@ -280,19 +546,17 @@ class FacialLandmarkDetector:
         image: Union[str, Path, np.ndarray, Image.Image],
         face_index: int = 0
     ) -> Optional[np.ndarray]:
+        """Detect 478 MediaPipe landmarks with fallback strategies."""
         try:
-            # Preprocess image
             image_array, height, width = self._preprocess_image(image)
             
-            # Detect landmarks using MediaPipe
-            results = self.face_mesh.process(image_array)
+            # Robust detection with fallback strategies
+            results, transform_params = self._detect_landmarks_robust(image_array, height, width)
             
-            # Check if any faces were detected
-            if not results.multi_face_landmarks:
+            if results is None or not results.multi_face_landmarks:
                 print("Warning: No faces detected in the image")
                 return None
             
-            # Check if requested face index is valid
             num_faces = len(results.multi_face_landmarks)
             if face_index >= num_faces:
                 print(
@@ -301,14 +565,29 @@ class FacialLandmarkDetector:
                 )
                 face_index = 0
             
-            # Extract landmarks for the specified face
             face_landmarks = results.multi_face_landmarks[face_index]
             
-            landmarks_pixel = np.zeros((self.num_landmarks, 2), dtype=np.float32)
+            # Determine processed image dimensions
+            if transform_params is None:
+                proc_height, proc_width = height, width
+            elif isinstance(transform_params[0], str) and transform_params[0] == 'scale':
+                scale_factor = transform_params[1]
+                proc_width = int(width * scale_factor)
+                proc_height = int(height * scale_factor)
+            else:
+                x1, y1, x2, y2, scale = transform_params
+                proc_width = int((x2 - x1) * scale) if scale > 1.0 else (x2 - x1)
+                proc_height = int((y2 - y1) * scale) if scale > 1.0 else (y2 - y1)
             
+            landmarks_pixel = np.zeros((self.num_landmarks, 2), dtype=np.float32)
             for idx, landmark in enumerate(face_landmarks.landmark):
-                landmarks_pixel[idx, 0] = landmark.x * width
-                landmarks_pixel[idx, 1] = landmark.y * height
+                landmarks_pixel[idx, 0] = landmark.x * proc_width
+                landmarks_pixel[idx, 1] = landmark.y * proc_height
+            
+            # Transform back to original coordinates
+            landmarks_pixel = self._transform_landmarks_to_original(
+                landmarks_pixel, transform_params, height, width, proc_height, proc_width
+            )
             
             return landmarks_pixel
             
@@ -389,11 +668,13 @@ class FacialLandmarkDetector:
         image: Union[str, Path, np.ndarray, Image.Image],
         face_index: int = 0
     ) -> Optional[np.ndarray]:
+        """Detect 478 MediaPipe 3D landmarks with fallback strategies."""
         try:
             image_array, height, width = self._preprocess_image(image)
-            results = self.face_mesh.process(image_array)
             
-            if not results.multi_face_landmarks:
+            results, transform_params = self._detect_landmarks_robust(image_array, height, width)
+            
+            if results is None or not results.multi_face_landmarks:
                 return None
             
             num_faces = len(results.multi_face_landmarks)
@@ -402,18 +683,230 @@ class FacialLandmarkDetector:
             
             face_landmarks = results.multi_face_landmarks[face_index]
             
-            landmarks_3d = np.zeros((self.num_landmarks, 3), dtype=np.float32)
+            # Determine processed image dimensions
+            if transform_params is None:
+                proc_height, proc_width = height, width
+            elif isinstance(transform_params[0], str) and transform_params[0] == 'scale':
+                scale_factor = transform_params[1]
+                proc_width = int(width * scale_factor)
+                proc_height = int(height * scale_factor)
+            else:
+                x1, y1, x2, y2, scale = transform_params
+                proc_width = int((x2 - x1) * scale) if scale > 1.0 else (x2 - x1)
+                proc_height = int((y2 - y1) * scale) if scale > 1.0 else (y2 - y1)
             
+            landmarks_3d = np.zeros((self.num_landmarks, 3), dtype=np.float32)
             for idx, landmark in enumerate(face_landmarks.landmark):
-                landmarks_3d[idx, 0] = landmark.x * width
-                landmarks_3d[idx, 1] = landmark.y * height
-                landmarks_3d[idx, 2] = landmark.z * width
+                landmarks_3d[idx, 0] = landmark.x * proc_width
+                landmarks_3d[idx, 1] = landmark.y * proc_height
+                landmarks_3d[idx, 2] = landmark.z * proc_width
+            
+            # Transform back to original coordinates
+            landmarks_3d = self._transform_landmarks_to_original(
+                landmarks_3d, transform_params, height, width, proc_height, proc_width
+            )
             
             return landmarks_3d
             
         except Exception as e:
             print(f"Error during 3D landmark detection: {e}")
             return None
+    
+    def crop_face(
+        self,
+        image: Union[str, Path, np.ndarray, Image.Image],
+        scale: float = 1.8,
+        target_size: Optional[int] = None,
+        return_params: bool = False,
+        face_index: int = 0
+    ) -> Optional[Union[np.ndarray, Tuple[np.ndarray, dict]]]:
+        """
+        Robust face cropping with multiple fallback strategies.
+        
+        This method detects faces using multiple strategies (including fallback
+        confidence thresholds, image enhancement, and multi-scale detection)
+        and crops the face region with configurable scaling.
+        
+        Args:
+            image: Input image (path, numpy array, or PIL Image)
+            scale: Scale factor for the crop bounding box (default 1.8)
+            target_size: If provided, resize the cropped image to this size (square)
+            return_params: If True, also return crop parameters for uncropping
+            face_index: Which face to crop if multiple detected (default 0)
+            
+        Returns:
+            If return_params=False: Cropped image as numpy array (RGB), or None if no face
+            If return_params=True: Tuple of (cropped_image, crop_params_dict)
+                crop_params_dict contains:
+                    - 'original_bbox': [x, y, w, h] detected face bbox
+                    - 'crop_coords': [x1, y1, x2, y2] actual crop coordinates
+                    - 'original_size': [width, height] of input image
+                    - 'cropped_size': [width, height] of output crop
+                    - 'scale_factor': scale factor used
+        """
+        try:
+            # Preprocess image
+            image_array, height, width = self._preprocess_image(image)
+            
+            # Try to detect face with robust fallback strategies
+            bbox_result = self._detect_face_robust(image_array)
+            
+            if bbox_result is None:
+                print("Warning: No face detected after all fallback strategies")
+                return None
+            
+            x, y, w, h = bbox_result
+            
+            # Compute center and scaled crop region
+            center_x = x + w // 2
+            center_y = y + h // 2
+            
+            # Use the larger dimension and apply scale
+            size = max(w, h)
+            scaled_size = int(size * scale)
+            
+            # Compute crop coordinates (clamped to image bounds)
+            x1 = max(0, center_x - scaled_size // 2)
+            y1 = max(0, center_y - scaled_size // 2)
+            x2 = min(width, center_x + scaled_size // 2)
+            y2 = min(height, center_y + scaled_size // 2)
+            
+            # Extract crop
+            cropped = image_array[y1:y2, x1:x2].copy()
+            
+            # Make square if not already (pad with zeros)
+            crop_h, crop_w = cropped.shape[:2]
+            if crop_h != crop_w:
+                max_dim = max(crop_h, crop_w)
+                square = np.zeros((max_dim, max_dim, 3), dtype=np.uint8)
+                y_offset = (max_dim - crop_h) // 2
+                x_offset = (max_dim - crop_w) // 2
+                square[y_offset:y_offset+crop_h, x_offset:x_offset+crop_w] = cropped
+                cropped = square
+                # Update crop info for padding
+                x1 -= x_offset
+                y1 -= y_offset
+                x2 = x1 + max_dim
+                y2 = y1 + max_dim
+            
+            # Resize if target size specified
+            output_size = cropped.shape[:2]
+            if target_size is not None:
+                cropped = cv2.resize(cropped, (target_size, target_size), interpolation=cv2.INTER_LANCZOS4)
+                output_size = (target_size, target_size)
+            
+            if return_params:
+                crop_params = {
+                    'original_bbox': [x, y, w, h],
+                    'crop_coords': [x1, y1, x2, y2],
+                    'original_size': [width, height],
+                    'cropped_size': list(output_size),
+                    'scale_factor': scale
+                }
+                return cropped, crop_params
+            
+            return cropped
+            
+        except Exception as e:
+            print(f"Error during face cropping: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _detect_face_robust(
+        self,
+        image_array: np.ndarray
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Robust face detection with multiple fallback strategies.
+        
+        Returns:
+            Tuple of (x, y, w, h) bounding box or None if no face detected
+        """
+        height, width = image_array.shape[:2]
+        
+        # Strategy 1: Try both face detection models
+        for detector in [self.face_detection, self.face_detection_short]:
+            results = detector.process(image_array)
+            if results.detections:
+                bbox = results.detections[0].location_data.relative_bounding_box
+                x = int(bbox.xmin * width)
+                y = int(bbox.ymin * height)
+                w = int(bbox.width * width)
+                h = int(bbox.height * height)
+                return (x, y, w, h)
+        
+        # Strategy 2: Try with enhanced image (CLAHE)
+        if self.enable_preprocessing:
+            enhanced = self._enhance_image(image_array)
+            for detector in [self.face_detection, self.face_detection_short]:
+                results = detector.process(enhanced)
+                if results.detections:
+                    bbox = results.detections[0].location_data.relative_bounding_box
+                    x = int(bbox.xmin * width)
+                    y = int(bbox.ymin * height)
+                    w = int(bbox.width * width)
+                    h = int(bbox.height * height)
+                    return (x, y, w, h)
+        
+        # Strategy 3: Try multi-scale detection
+        for scale_factor in [1.5, 2.0, 0.75, 0.5]:
+            new_w = int(width * scale_factor)
+            new_h = int(height * scale_factor)
+            if new_w < 64 or new_h < 64 or new_w > 4096 or new_h > 4096:
+                continue
+            
+            scaled = cv2.resize(image_array, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            for detector in [self.face_detection, self.face_detection_short]:
+                results = detector.process(scaled)
+                if results.detections:
+                    bbox = results.detections[0].location_data.relative_bounding_box
+                    # Convert back to original image coordinates
+                    x = int(bbox.xmin * width)
+                    y = int(bbox.ymin * height)
+                    w = int(bbox.width * width)
+                    h = int(bbox.height * height)
+                    return (x, y, w, h)
+        
+        # Strategy 4: Try with lower confidence thresholds
+        for conf in [0.3, 0.2, 0.1]:
+            try:
+                low_conf_detector = self.mp_face_detection.FaceDetection(
+                    model_selection=1,
+                    min_detection_confidence=conf
+                )
+                results = low_conf_detector.process(image_array)
+                low_conf_detector.close()
+                
+                if results.detections:
+                    bbox = results.detections[0].location_data.relative_bounding_box
+                    x = int(bbox.xmin * width)
+                    y = int(bbox.ymin * height)
+                    w = int(bbox.width * width)
+                    h = int(bbox.height * height)
+                    return (x, y, w, h)
+            except Exception:
+                continue
+        
+        # Strategy 5: Use face mesh landmarks to estimate bbox
+        results = self._process_with_fallback(image_array)
+        if results and results.multi_face_landmarks:
+            face_landmarks = results.multi_face_landmarks[0]
+            xs = [lm.x * width for lm in face_landmarks.landmark]
+            ys = [lm.y * height for lm in face_landmarks.landmark]
+            x = int(min(xs))
+            y = int(min(ys))
+            w = int(max(xs) - min(xs))
+            h = int(max(ys) - min(ys))
+            # Add some padding
+            pad = int(max(w, h) * 0.1)
+            x = max(0, x - pad)
+            y = max(0, y - pad)
+            w = min(width - x, w + 2 * pad)
+            h = min(height - y, h + 2 * pad)
+            return (x, y, w, h)
+        
+        return None
     
     def batch_process(
         self,
@@ -844,7 +1337,7 @@ if __name__ == "__main__":
             print(f"  Width: {result['image_width']}")
             print(f"  Height: {result['image_height']}")
             
-            print(f"\nLandmark formats:")
+            print(f"\n2D Landmark formats:")
             print(f"  ldm478 (Full MediaPipe): {result['ldm478'].shape}")
             print(f"  ldm468 (MediaPipe without iris): {result['ldm468'].shape}")
             print(f"  ldm68 (Dlib format): {result['ldm68'].shape}")
@@ -853,15 +1346,34 @@ if __name__ == "__main__":
             else:
                 print(f"  ldm105_flame: Not available (mapping file not found)")
             
-            print(f"\nSample landmarks (ldm478):")
+            print(f"\n3D Landmark formats:")
+            print(f"  ldm478_3d (Full MediaPipe 3D): {result['ldm478_3d'].shape}")
+            print(f"  ldm468_3d (MediaPipe 3D without iris): {result['ldm468_3d'].shape}")
+            print(f"  ldm68_3d (Dlib format 3D): {result['ldm68_3d'].shape}")
+            if result['ldm105_flame_3d'] is not None:
+                print(f"  ldm105_flame_3d (FLAME subset 3D): {result['ldm105_flame_3d'].shape}")
+            else:
+                print(f"  ldm105_flame_3d: Not available (mapping file not found)")
+            
+            print(f"\nSample 2D landmarks (ldm478):")
             print(f"  Nose tip (index 4): {result['ldm478'][4]}")
             print(f"  Left iris center (index 468): {result['ldm478'][468]}")
             print(f"  Right iris center (index 473): {result['ldm478'][473]}")
             
-            print(f"\nSample Dlib landmarks (ldm68):")
+            print(f"\nSample 3D landmarks (ldm478_3d):")
+            print(f"  Nose tip (index 4): {result['ldm478_3d'][4]}")
+            print(f"  Left iris center (index 468): {result['ldm478_3d'][468]}")
+            print(f"  Right iris center (index 473): {result['ldm478_3d'][473]}")
+            
+            print(f"\nSample Dlib 2D landmarks (ldm68):")
             print(f"  Nose tip (index 30): {result['ldm68'][30]}")
-            print(f"  Left eye center (index 36): {result['ldm68'][36]}")
-            print(f"  Right eye center (index 45): {result['ldm68'][45]}")
+            print(f"  Left eye corner (index 36): {result['ldm68'][36]}")
+            print(f"  Right eye corner (index 45): {result['ldm68'][45]}")
+            
+            print(f"\nSample Dlib 3D landmarks (ldm68_3d):")
+            print(f"  Nose tip (index 30): {result['ldm68_3d'][30]}")
+            print(f"  Left eye corner (index 36): {result['ldm68_3d'][36]}")
+            print(f"  Right eye corner (index 45): {result['ldm68_3d'][45]}")
             
             # Get face region indices
             regions = detector.get_face_region_indices()

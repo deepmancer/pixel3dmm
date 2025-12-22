@@ -17,38 +17,47 @@ from pixel3dmm import env_paths
 # Add utils directory to path for FacialLandmarkDetector
 from pixel3dmm.preprocessing.facial_landmark_detector import FacialLandmarkDetector
 
+# Global detector instance for reuse (initialized lazily)
+_facial_landmark_detector = None
+
+
+def get_facial_landmark_detector():
+    """Get or create a shared FacialLandmarkDetector instance."""
+    global _facial_landmark_detector
+    if _facial_landmark_detector is None:
+        _facial_landmark_detector = FacialLandmarkDetector(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            enable_fallback=True,
+            fallback_confidence_thresholds=(0.3, 0.2, 0.1),
+            enable_preprocessing=True
+        )
+    return _facial_landmark_detector
+
 
 def detect_face_mediapipe(image):
     """
-    Detect face in image using MediaPipe face detection.
+    Detect face in image using robust MediaPipe face detection with fallbacks.
     
     Args:
-        image: BGR image from cv2.imread
+        image: BGR image from cv2.imread (will be converted to RGB internally)
         
     Returns:
         Tuple of (x, y, w, h) bounding box or None if no face detected
     """
-    mp_face_detection = mp.solutions.face_detection
+    detector = get_facial_landmark_detector()
     
-    with mp_face_detection.FaceDetection(
-        model_selection=1,
-        min_detection_confidence=0.5
-    ) as face_detection:
-        results = face_detection.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        
-        if not results.detections:
-            return None
-        
-        detection = results.detections[0]
-        bboxC = detection.location_data.relative_bounding_box
-        ih, iw, _ = image.shape
-        
-        x = int(bboxC.xmin * iw)
-        y = int(bboxC.ymin * ih)
-        w = int(bboxC.width * iw)
-        h = int(bboxC.height * ih)
-        
-        return (x, y, w, h)
+    # Convert BGR to RGB for the detector
+    if len(image.shape) == 3 and image.shape[2] == 3:
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    else:
+        image_rgb = image
+    
+    # Use the robust face detection method
+    return detector._detect_face_robust(image_rgb)
 
 
 def crop_face_from_bbox_mediapipe(image, bbox, scale=1.8):
@@ -56,7 +65,7 @@ def crop_face_from_bbox_mediapipe(image, bbox, scale=1.8):
     Crop face from image using bounding box with scaling.
     
     Args:
-        image: Input image
+        image: Input image (BGR)
         bbox: Tuple of (x, y, w, h) bounding box
         scale: Scale factor for cropping (default 1.8)
         
@@ -578,15 +587,9 @@ def extract_mediapipe_landmarks_for_preprocessing(image_dir):
         print(f"Warning: Mapping file not found at {mapping_file}")
         print("Will extract all 478 landmarks")
     
-    # Initialize MediaPipe detector
+    # Initialize MediaPipe detector - use shared instance with full fallback capabilities
     try:
-        detector = FacialLandmarkDetector(
-            static_image_mode=True,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        detector = get_facial_landmark_detector()
     except Exception as e:
         print(f"Error initializing MediaPipe detector: {e}")
         print("Skipping MediaPipe landmark extraction")

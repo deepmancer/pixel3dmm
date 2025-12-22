@@ -16,7 +16,7 @@ start_frame : 0
 num_shape_params : 300
 num_exp_params : 100
 tex_params : 140
-iters : 1000 #800 #400 # Number if iterations in first stage of tracking. For single-image fitting, you might want to choose a larger value, e.g. 500 or 800
+iters : 800 #800 #400 # Number if iterations in first stage of tracking. For single-image fitting, you might want to choose a larger value, e.g. 500 or 800
 global_iters : 5000 # Number f iterations for second stage of tracking (video only)
 
 
@@ -72,7 +72,7 @@ use_mediapipe_landmarks : True # enable MediaPipe landmark support for improved 
 w_lmks_mediapipe : 1000 # weight for MediaPipe landmarks during FLAME optimization
 w_lmks_mediapipe_cam : 3000 # weight for MediaPipe landmarks during camera optimization (higher for better init)
 
-include_neck : True # whether to optimize for neck or not
+include_neck : False # whether to optimize for neck or not
 
 # regualization weights for different optimizable parameters
 w_shape :  0.4

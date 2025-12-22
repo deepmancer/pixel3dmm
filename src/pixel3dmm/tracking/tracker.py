@@ -143,7 +143,7 @@ class Tracker(object):
             DATA_FOLDER = f'{env_paths.PREPROCESSED_DATA}/{self.actor_name}'
         
         self.preprocessed_dir = DATA_FOLDER
-        self.MAX_STEPS = min(len([f for f in os.listdir(f'{DATA_FOLDER}/cropped/') if f.endswith('.jpg') or f.endswith('.png')]) - self.config.start_frame, 1000)
+        self.MAX_STEPS = min(len([f for f in os.listdir(f'{DATA_FOLDER}/cropped/') if f.endswith('.jpg') or f.endswith('.png')]) - self.config.start_frame, 800)
         self.FRAME_SKIP = 1
         self.BATCH_SIZE = min(self.config.batch_size, self.MAX_STEPS)
 
@@ -1840,7 +1840,7 @@ class Tracker(object):
                 else:
                     self.cached_data[k].append(batch[k])
             if timestep == self.config.start_frame:
-                self.optimize_camera(batch, steps=1000, is_first_frame=True)
+                self.optimize_camera(batch, steps=800, is_first_frame=True)
                 #params = lambda: self.clone_params_keyframes_all(freeze_id=self.config.is_discontinuous, freeze_cam=self.config.global_camera, include_neck=self.config.include_neck)
                 params = lambda: self.clone_params_keyframes_all(freeze_id=not (self.MAX_STEPS==1), freeze_cam=self.config.global_camera, include_neck=self.config.include_neck)
                 is_first_step = True
@@ -1934,7 +1934,7 @@ class Tracker(object):
 
             self.optimize_color(None, params,
                                 no_lm=self.no_lm,
-                                save_timestep=1000, #timestep,
+                                save_timestep=800, #timestep,
                                 is_joint=True,
                                 )
 
