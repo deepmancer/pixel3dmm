@@ -72,7 +72,7 @@ use_mediapipe_landmarks : True # enable MediaPipe landmark support for improved 
 w_lmks_mediapipe : 1000 # weight for MediaPipe landmarks during FLAME optimization
 w_lmks_mediapipe_cam : 3000 # weight for MediaPipe landmarks during camera optimization (higher for better init)
 
-include_neck : False # whether to optimize for neck or not
+include_neck : True # whether to optimize for neck or not
 
 # regualization weights for different optimizable parameters
 w_shape :  0.4
