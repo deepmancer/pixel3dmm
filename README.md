@@ -183,11 +183,11 @@ You can run our tracker on example videos, by following the steps described in [
 
 If you find our code or paper useful, please consider citing
 ```bibtex
-@misc{giebenhain2025pixel3dmm,
-title={Pixel3DMM: Versatile Screen-Space Priors for Single-Image 3D Face Reconstruction},
-author={Simon Giebenhain and Tobias Kirschstein and  Martin R{\"{u}}nz and Lourdes Agapito and Matthias Nie{\ss}ner},
-year={2025},
-url={https://arxiv.org/abs/2505.00615},
+@article{giebenhain2025pixel3dmm,
+  title={Pixel3DMM: Versatile Screen-Space Priors for Single-Image 3D Face Reconstruction},
+  author={Giebenhain, Simon and Kirschstein, Tobias and R{\"{u}}nz, Rünz and Agapito,Lourdes and Nie{\ss}ner, Matthias},
+  journal={arXiv preprint arXiv:2505.00615},
+  year={2025}
 }
 ```
 
